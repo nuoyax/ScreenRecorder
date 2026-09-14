@@ -1,4 +1,4 @@
-# Screen Record（屏幕录制）
+# ScreenRecorder（屏幕录制）
 
 [English](README.md) | **中文**
 
@@ -31,7 +31,7 @@ cargo build --release
 
 ## 使用
 
-启动 `screen-record.exe`，选择录制源、调整画质，按 **Alt+R**（或界面按钮）开始录制。默认输出到 `视频\ScreenRecord\recording_YYYYMMDD_HHMMSS.mp4`。
+启动 `screen-recorder.exe`，选择录制源、调整画质，按 **Alt+R**（或界面按钮）开始录制。默认输出到 `视频\ScreenRecord\recording_YYYYMMDD_HHMMSS.mp4`。
 
 ### 画质档位（1080p/30fps 码率参考）
 

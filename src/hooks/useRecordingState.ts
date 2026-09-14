@@ -23,6 +23,11 @@ export function useRecordingState() {
       unlisten = await api.onProgress((p) => {
         if (!cancelled) apply(p);
       });
+      void api.onCodecFallback((codec) => {
+        if (!cancelled && codec === "h265") {
+          console.warn("HEVC 不可用，已自动切换 H.264");
+        }
+      });
     })();
     return () => {
       cancelled = true;

@@ -1,4 +1,4 @@
-# Screen Record
+# ScreenRecorder
 
 **English** | [中文](README.zh-CN.md)
 
@@ -31,7 +31,7 @@ cargo build --release
 
 ## Usage
 
-Launch `screen-record.exe`, pick a source, tune quality, then press **Alt+R** (or the UI button) to record. Default output: `Videos\ScreenRecord\recording_YYYYMMDD_HHMMSS.mp4`.
+Launch `screen-recorder.exe`, pick a source, tune quality, then press **Alt+R** (or the UI button) to record. Default output: `Videos\ScreenRecord\recording_YYYYMMDD_HHMMSS.mp4`.
 
 ### Quality presets (bitrate guidance at 1080p/30fps)
 

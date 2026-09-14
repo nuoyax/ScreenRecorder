@@ -1,8 +1,9 @@
 [package]
-name = "screen-record"
+name = "screen-recorder"
 version = "0.1.0"
 description = "Windows screen recorder"
 edition = "2021"
+default-run = "screen-recorder"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

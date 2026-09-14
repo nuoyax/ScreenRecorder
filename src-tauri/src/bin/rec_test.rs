@@ -1,10 +1,10 @@
 //! End-to-end smoke test: capture primary monitor for 6s, encode to MP4,
 //! verify the file exists and is non-trivial. Mirrors the start_recording path.
 
-use screen_record::capture::enum_sources::enumerate_monitors;
-use screen_record::capture::wgc::SourceKind;
+use screen_recorder::capture::enum_sources::enumerate_monitors;
+use screen_recorder::capture::wgc::SourceKind;
 
-use screen_record::recorder::{Recorder, RecorderOptions};
+use screen_recorder::recorder::{Recorder, RecorderOptions};
 use std::time::Duration;
 
 fn main() {

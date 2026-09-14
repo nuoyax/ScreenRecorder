@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Button, List, Tooltip } from "antd";
+import { Button, List } from "antd";
 import {
   AppstoreOutlined,
   CloseOutlined,
@@ -13,9 +13,10 @@ import { api, type HistoryEntry } from "@/lib/api";
 import { fileName, formatDuration, parentDir } from "@/lib/format";
 import { useRecordingState } from "@/hooks/useRecordingState";
 
-const BAR_W = 376;
+const BAR_W = 260;
 const BAR_H = 60;
 const BAR_H_EXPANDED = 394;
+const MARGIN = 72;
 
 export function ToolbarPage() {
   const { state, duration } = useRecordingState();
@@ -26,6 +27,15 @@ export function ToolbarPage() {
   useEffect(() => {
     if (histOpen) api.listRecordings().then(setHistory).catch(() => undefined);
   }, [histOpen, state]);
+
+  useEffect(() => {
+    const un = api.onRecordingSaved(() => {
+      api.listRecordings().then(setHistory).catch(() => undefined);
+    });
+    return () => {
+      un.then((f) => f()).catch(() => undefined);
+    };
+  }, []);
 
   useEffect(() => {
     void resizeWindow(false);
@@ -40,8 +50,8 @@ export function ToolbarPage() {
       if (!monitor) return;
       const wa = monitor.workArea;
       const H = expanded ? BAR_H_EXPANDED : BAR_H;
-      const x = wa.position.x + wa.size.width - Math.round(BAR_W * scale) - 24;
-      const y = wa.position.y + wa.size.height - Math.round(H * scale) - 24;
+      const x = wa.position.x + wa.size.width - Math.round(BAR_W * scale) - MARGIN;
+      const y = wa.position.y + wa.size.height - Math.round(H * scale) - MARGIN;
       await w.setPosition(new PhysicalPosition(x, y));
     } catch {
       /* pin is best-effort */
@@ -51,7 +61,7 @@ export function ToolbarPage() {
   return (
     <div className="flex h-full w-full flex-col">
       <div
-        className="drag-region flex h-14 w-full shrink-0 items-center gap-1 rounded-[14px] bg-canvas/90 px-2.5 shadow-[0_8px_24px_rgba(0,0,0,.28)] backdrop-blur-md"
+        className="drag-region flex h-14 w-full shrink-0 items-center gap-1 bg-canvas/90 px-2.5"
         onDoubleClick={async (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -66,15 +76,15 @@ export function ToolbarPage() {
           }
         }}
       >
-        <span
-          className={`h-2 w-2 shrink-0 rounded-full ${
-            state === "recording"
-              ? "bg-rec rec-blink rec-halo"
-              : state === "paused"
-                ? "bg-pause"
-                : "bg-ctl"
-          }`}
-        />
+        {state === "recording" || state === "paused" ? (
+          <span
+            className={`h-2 w-2 shrink-0 rounded-full ${
+              state === "recording" ? "bg-rec rec-blink" : "bg-pause"
+            }`}
+          />
+        ) : (
+          <span className="h-2 w-2 shrink-0" />
+        )}
         <span
           className={`no-drag min-w-10 text-center text-xs font-semibold tabular-nums ${
             err
@@ -109,59 +119,52 @@ export function ToolbarPage() {
             onStop={async () => {
               try {
                 await api.stopRecording();
-                setHistory(await api.listRecordings());
               } catch {
                 /* ignore */
               }
             }}
           />
-          <Tooltip title="录制历史">
-            <Button
-              type={histOpen ? "default" : "text"}
-              className="!h-8 !w-8 !min-w-8 !p-0"
-              icon={<UnorderedListOutlined />}
-              onClick={async () => {
-                const next = !histOpen;
-                setHistOpen(next);
-                await resizeWindow(next);
-              }}
-            />
-          </Tooltip>
-          <Tooltip title="打开主窗口">
-            <Button
-              type="text"
-              className="!h-8 !w-8 !min-w-8 !p-0"
-              icon={<AppstoreOutlined />}
-              onClick={async () => {
-                const w = await WebviewWindow.getByLabel("main");
-                if (w) {
-                  await w.show();
-                  await w.setFocus();
-                }
-              }}
-            />
-          </Tooltip>
-          <Tooltip title="退出">
-            <Button
-              type="text"
-              className="!h-8 !w-8 !min-w-8 !p-0"
-              icon={<CloseOutlined />}
-              onClick={async () => {
-                try {
-                  await api.quitApp();
-                } catch {
-                  const main = await WebviewWindow.getByLabel("main");
-                  if (main) await main.close();
-                  await getCurrentWindow().close();
-                }
-              }}
-            />
-          </Tooltip>
+          <Button
+            type={histOpen ? "default" : "text"}
+            className="!h-8 !w-8 !min-w-8 !p-0"
+            icon={<UnorderedListOutlined />}
+            onClick={async () => {
+              const next = !histOpen;
+              setHistOpen(next);
+              await resizeWindow(next);
+            }}
+          />
+          <Button
+            type="text"
+            className="!h-8 !w-8 !min-w-8 !p-0"
+            icon={<AppstoreOutlined />}
+            onClick={async () => {
+              const w = await WebviewWindow.getByLabel("main");
+              if (w) {
+                await w.show();
+                await w.setFocus();
+              }
+            }}
+          />
+          <Button
+            type="text"
+            className="!h-8 !w-8 !min-w-8 !p-0"
+            icon={<CloseOutlined />}
+            onClick={async () => {
+              try {
+                await api.quitApp();
+              } catch {
+                const main = await WebviewWindow.getByLabel("main");
+                if (main) await main.close();
+                await getCurrentWindow().close();
+              }
+            }}
+          />
         </div>
       </div>
 
       {histOpen && (
-        <div className="no-drag mt-1.5 min-h-0 flex-1 overflow-y-auto rounded-xl bg-canvas/90 p-2.5 shadow-[0_8px_24px_rgba(0,0,0,.28)] backdrop-blur-md">
+        <div className="no-drag mt-1.5 min-h-0 flex-1 overflow-y-auto bg-canvas/90 p-2.5">
           <h3 className="mb-2 px-1.5 text-xs font-semibold text-muted">录制历史</h3>
           {history.length === 0 ? (
             <p className="py-4 text-center text-muted">暂无录制</p>

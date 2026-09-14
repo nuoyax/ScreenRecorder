@@ -76,4 +76,8 @@ export const api = {
   quitApp: () => invoke<void>("quit_app"),
   onProgress: (handler: (p: Progress) => void): Promise<UnlistenFn> =>
     listen<Progress>("recording-progress", (e) => handler(e.payload)),
+  onCodecFallback: (handler: (codec: string) => void): Promise<UnlistenFn> =>
+    listen<string>("codec-fallback", (e) => handler(e.payload)),
+  onRecordingSaved: (handler: (path: string) => void): Promise<UnlistenFn> =>
+    listen<string>("recording-saved", (e) => handler(e.payload)),
 };

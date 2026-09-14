@@ -3,6 +3,7 @@ import {
   BorderOutlined,
   CaretRightOutlined,
   PauseOutlined,
+  VideoCameraOutlined,
 } from "@ant-design/icons";
 import type { RecState } from "@/lib/api";
 
@@ -20,29 +21,30 @@ export function Transport({ state, onStart, onPause, onStop, compact }: Props) {
 
   return (
     <div className={`flex items-center ${compact ? "gap-1" : "gap-2"}`}>
-      <Button
-        type="primary"
-        danger
-        disabled={busy}
-        onClick={onStart}
-        className={compact ? "!h-8 !w-8 !min-w-8 !p-0" : "flex-1"}
-        icon={
-          <span
-            className={`inline-block h-3 w-3 rounded-full bg-white ${
-              busy ? "rec-btn-breathe" : ""
-            }`}
-          />
-        }
-      >
-        {compact ? null : busy ? "录制中" : "开始录制"}
-      </Button>
-      <Button
-        disabled={!busy}
-        onClick={onPause}
-        title={paused ? "恢复" : "暂停"}
-        className={`!h-8 !w-8 !min-w-8 !p-0 ${paused ? "!bg-pause !text-canvas !border-none" : ""}`}
-        icon={paused ? <CaretRightOutlined /> : <PauseOutlined />}
-      />
+      {busy ? (
+        <Button
+          type="primary"
+          onClick={onPause}
+          title={paused ? "恢复" : "暂停"}
+          className={`!h-8 !w-8 !min-w-8 !p-0 ${
+            paused ? "!bg-pause !border-pause" : "!bg-rec !border-rec"
+          }`}
+          icon={paused ? <CaretRightOutlined /> : <PauseOutlined />}
+        />
+      ) : (
+        <Button
+          type="primary"
+          danger
+          onClick={onStart}
+          title="开始录制"
+          className={
+            compact
+              ? "!h-8 !w-8 !min-w-8 !p-0"
+              : "flex-1 !h-8 !w-8 !min-w-8 !p-0 mx-auto"
+          }
+          icon={<VideoCameraOutlined />}
+        />
+      )}
       <Button
         disabled={!busy}
         onClick={onStop}

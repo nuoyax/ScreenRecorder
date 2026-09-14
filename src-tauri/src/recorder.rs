@@ -280,10 +280,15 @@ impl Recorder {
             now_us().saturating_sub(self.start_us)
                 - self.paused_total_us.load(Ordering::SeqCst)
         } else if st == State::Paused {
+            // freeze duration at pause moment: also subtract the ongoing pause span
             self.pause_started_at
                 .lock()
                 .unwrap()
-                .map(|_t| now_us().saturating_sub(self.start_us) - self.paused_total_us.load(Ordering::SeqCst))
+                .map(|t| {
+                    now_us().saturating_sub(self.start_us)
+                        - self.paused_total_us.load(Ordering::SeqCst)
+                        - t.elapsed().as_micros() as u64
+                })
                 .unwrap_or(0)
         } else {
             0

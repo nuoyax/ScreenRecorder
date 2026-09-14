@@ -25,6 +25,12 @@ body {
   user-select: none;
 }
 
+/* toolbar/indicator windows need true transparency */
+html.bg-transparent,
+html.bg-transparent body {
+  background: transparent;
+}
+
 .drag-region {
   -webkit-app-region: drag;
 }
@@ -34,45 +40,21 @@ body {
 }
 
 @keyframes rec-blink {
-  50% {
-    opacity: 0.35;
-  }
-}
-
-@keyframes rec-halo {
-  0% {
-    box-shadow: 0 0 0 0 rgba(255, 59, 48, 0.55);
-  }
-  70% {
-    box-shadow: 0 0 0 6px rgba(255, 59, 48, 0);
-  }
-  100% {
-    box-shadow: 0 0 0 0 rgba(255, 59, 48, 0);
-  }
-}
-
-@keyframes rec-btn-breathe {
   0%,
+  45% {
+    opacity: 1;
+  }
+  50%,
+  95% {
+    opacity: 0.08;
+  }
   100% {
     opacity: 1;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 0.55;
-    transform: scale(0.82);
   }
 }
 
 .rec-blink {
-  animation: rec-blink 1s infinite;
-}
-
-.rec-halo {
-  animation: rec-halo 1.4s ease-out infinite;
-}
-
-.rec-btn-breathe {
-  animation: rec-btn-breathe 1.2s ease-in-out infinite;
+  animation: rec-blink 1.2s step-end infinite;
 }
 
 .recent-tabs .ant-tabs-nav::before {

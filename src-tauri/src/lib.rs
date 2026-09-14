@@ -52,9 +52,38 @@ fn default_output_dir(app: &AppHandle) -> PathBuf {
 
 #[tauri::command]
 fn start_recording(app: AppHandle, ctx: Ctx) -> Result<String, String> {
-    let s = ctx.settings.lock().unwrap().clone();
+    let mut s = ctx.settings.lock().unwrap().clone();
     if ctx.recorder.lock().unwrap().is_some() {
         return Err("already recording".into());
+    }
+    // HEVC may be unavailable (no encoder MFT installed); probe synchronously
+    // and fall back to H.264 so recording still works.
+    if s.codec == "h265" {
+        let probe_path = std::env::temp_dir().join("hevc_probe.mp4");
+        let _ = std::fs::remove_file(&probe_path);
+        let probe = encoder::SinkEncoder::new(
+            &probe_path,
+            &encoder::EncoderConfig {
+                width: 320,
+                height: 240,
+                fps: 30,
+                codec: "h265".into(),
+                bitrate_kbps: 2000,
+                rate_mode: "vbr".into(),
+                audio: None,
+                input_bgra: true,
+            },
+        );
+        match probe {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&probe_path);
+            }
+            Err(_) => {
+                s.codec = "h264".into();
+                eprintln!("[rec] HEVC 不可用，自动降级 H.264");
+                let _ = app.emit("codec-fallback", "h265");
+            }
+        }
     }
     let out_dir = s.output_dir.clone().unwrap_or_else(|| default_output_dir(&app));
     std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
@@ -132,6 +161,7 @@ fn start_recording(app: AppHandle, ctx: Ctx) -> Result<String, String> {
     })?;
 
     *ctx.recorder.lock().unwrap() = Some(rec.clone());
+    eprintln!("[rec] started → {}, codec={}, fps={}, bitrate={}kbps", out_path.display(), s.codec, s.fps, bitrate);
     Ok(out_path.to_string_lossy().into_owned())
 }
 
@@ -139,6 +169,7 @@ fn start_recording(app: AppHandle, ctx: Ctx) -> Result<String, String> {
 fn pause_recording(ctx: Ctx) -> Result<(), String> {
     let rec = ctx.recorder.lock().unwrap().clone().ok_or("not recording")?;
     rec.pause();
+    eprintln!("[rec] paused, state={:?}", rec.progress().state);
     Ok(())
 }
 
@@ -146,33 +177,53 @@ fn pause_recording(ctx: Ctx) -> Result<(), String> {
 fn resume_recording(ctx: Ctx) -> Result<(), String> {
     let rec = ctx.recorder.lock().unwrap().clone().ok_or("not recording")?;
     rec.resume();
+    eprintln!("[rec] resumed, state={:?}", rec.progress().state);
     Ok(())
 }
 
 #[tauri::command]
-fn stop_recording(ctx: Ctx) -> Result<String, String> {
+async fn stop_recording(app: AppHandle, ctx: Ctx<'_>) -> Result<String, String> {
     let rec_box = ctx.recorder.lock().unwrap().take().ok_or("not recording")?;
-    let path = {
-        let rec: Recorder = match Arc::try_unwrap(rec_box) {
-            Ok(r) => r,
-            Err(arc) => {
-                // other refs exist (progress thread); clone path and stop via flag
-                let p = arc.result_path.clone();
-                arc.stop_flag().store(true, std::sync::atomic::Ordering::SeqCst);
-                return Ok(p.to_string_lossy().into_owned());
-            }
-        };
-        rec.stop()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default()
+    eprintln!("[rec] stop requested");
+    // Finalizing a large MP4 can take a while; do it off the IPC thread and
+    // notify the UI when the file is ready.
+    let handle = app.clone();
+    let rec: Recorder = match Arc::try_unwrap(rec_box) {
+        Ok(r) => r,
+        Err(arc) => {
+            let p = arc.result_path.clone();
+            arc.stop_flag().store(true, std::sync::atomic::Ordering::SeqCst);
+            std::mem::forget(arc);
+            let _ = handle.emit("recording-saved", p.to_string_lossy().to_string());
+            return Ok(p.to_string_lossy().into_owned());
+        }
     };
-    Ok(path)
+    tauri::async_runtime::spawn(async move {
+        let path = rec
+            .stop()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        eprintln!("[rec] stop finished → {path}");
+        let _ = handle.emit("recording-saved", path.clone());
+    });
+    Ok(String::new())
 }
 
 #[tauri::command]
 fn recording_progress(ctx: Ctx) -> Option<recorder::Progress> {
     let rec = ctx.recorder.lock().unwrap().clone()?;
     Some(rec.progress())
+}
+
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    // stop any active recording first so the MP4 gets finalized
+    let st = app.state::<AppState>();
+    if let Some(rec) = st.recorder.lock().unwrap().take() {
+        rec.stop_flag()
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    app.exit(0);
 }
 
 #[derive(serde::Serialize)]
@@ -240,7 +291,8 @@ pub fn run() {
             stop_recording,
             recording_progress,
             list_recordings,
-            open_file
+            open_file,
+            quit_app
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -255,12 +307,14 @@ pub fn run() {
                 tauri::WebviewUrl::App("toolbar.html".into()),
             )
             .title("Toolbar")
-            .inner_size(250.0, 56.0)
+            .inner_size(260.0, 56.0)
             .decorations(false)
+            .shadow(false)
             .always_on_top(true)
             .resizable(false)
             .skip_taskbar(true)
             .transparent(true)
+            .background_color(tauri::window::Color(0x12, 0x14, 0x1a, 0xff))
             .build();
             if let Ok(tb) = toolbar {
                 let _ = pin_bottom_right(&tb);
@@ -276,33 +330,6 @@ pub fn run() {
                 }
             }
 
-            // recording indicator (top-left red dot), also excluded from capture
-            let indicator = tauri::WebviewWindowBuilder::new(
-                app,
-                "indicator",
-                tauri::WebviewUrl::App("indicator.html".into()),
-            )
-            .title("RecordingIndicator")
-            .inner_size(34.0, 34.0)
-            .decorations(false)
-            .always_on_top(true)
-            .resizable(false)
-            .skip_taskbar(true)
-            .transparent(true)
-            .visible(false)
-            .build();
-            if let Ok(ind) = indicator {
-                unsafe {
-                    use windows::Win32::UI::WindowsAndMessaging::{
-                        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
-                    };
-                    if let Ok(hwnd) = ind.hwnd() {
-                        let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
-                    }
-                }
-            }
-            let _ = indicator;
-
             // progress emitter
             let h2 = handle.clone();
             std::thread::spawn(move || loop {
@@ -312,6 +339,18 @@ pub fn run() {
                     let _ = h2.emit("recording-progress", rec.progress());
                 }
             });
+
+            // closing the main window quits the app entirely
+            if let Some(main) = app.get_webview_window("main") {
+                let handle_for_close = handle.clone();
+                main.on_window_event(move |event| {
+                    if let tauri::WindowEvent::Destroyed { .. } = event {
+                        // main window closed by user → exit everything
+                        let _ = handle_for_close;
+                        handle_for_close.exit(0);
+                    }
+                });
+            }
 
             // global shortcuts
             use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -336,7 +375,30 @@ pub fn run() {
 fn toggle_recording(app: &AppHandle) {
     let active = app.state::<AppState>().recorder.lock().unwrap().is_some();
     if active {
-        let _ = stop_recording(app.state());
+        let st = app.state::<AppState>();
+        let rec_box = st.recorder.lock().unwrap().take();
+        if let Some(rec_box) = rec_box {
+            eprintln!("[rec] stop requested (hotkey)");
+            let h = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let rec: Recorder = match Arc::try_unwrap(rec_box) {
+                    Ok(r) => r,
+                    Err(arc) => {
+                        let p = arc.result_path.clone();
+                        arc.stop_flag().store(true, std::sync::atomic::Ordering::SeqCst);
+                        std::mem::forget(arc);
+                        let _ = h.emit("recording-saved", p.to_string_lossy().to_string());
+                        return;
+                    }
+                };
+                let path = rec
+                    .stop()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                eprintln!("[rec] stop finished → {path}");
+                let _ = h.emit("recording-saved", path);
+            });
+        }
     } else {
         let _ = start_recording(app.clone(), app.state());
     }
@@ -360,7 +422,7 @@ fn pin_bottom_right(w: &tauri::WebviewWindow) -> tauri::Result<()> {
         .current_monitor()?
         .ok_or(tauri::Error::WindowNotFound)?;
     let size = w.outer_size()?;
-    let x = mon.position().x + mon.size().width as i32 - size.width as i32 - 24;
-    let y = mon.position().y + mon.size().height as i32 - size.height as i32 - 24;
+    let x = mon.position().x + mon.size().width as i32 - size.width as i32 - 48;
+    let y = mon.position().y + mon.size().height as i32 - size.height as i32 - 72;
     w.set_position(tauri::PhysicalPosition::new(x, y))
 }

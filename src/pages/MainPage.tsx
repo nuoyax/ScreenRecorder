@@ -84,6 +84,18 @@ export function MainPage() {
   }, [state]);
 
   useEffect(() => {
+    let cancelled = false;
+    api.onRecordingSaved((path) => {
+      if (cancelled) return;
+      api.listRecordings().then(setHistory).catch(() => undefined);
+      if (path) setHint(`已保存 → ${path}`);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     api.listSources().then(setSources).catch(() => undefined);
   }, [settings.source_kind]);
 
@@ -102,7 +114,7 @@ export function MainPage() {
     <div className="min-h-screen bg-canvas px-4 py-4 text-ink">
       <header className="mb-3.5 flex items-baseline justify-between">
         <Title level={4} className="!mb-0 !text-[18px] !text-ink">
-          Screen Record
+          ScreenRecorder
         </Title>
         <div
           className={`flex items-center gap-2 font-semibold tabular-nums text-xl ${
@@ -113,15 +125,13 @@ export function MainPage() {
                 : "text-muted"
           }`}
         >
-          <span
-            className={`h-2 w-2 rounded-full ${
-              state === "recording"
-                ? "bg-rec rec-blink"
-                : state === "paused"
-                  ? "bg-pause"
-                  : "bg-ctl"
-            }`}
-          />
+          {state !== "idle" && (
+            <span
+              className={`h-2 w-2 rounded-full ${
+                state === "recording" ? "bg-rec rec-blink" : "bg-pause"
+              }`}
+            />
+          )}
           {formatDuration(duration)}
         </div>
       </header>
@@ -148,8 +158,9 @@ export function MainPage() {
         }}
         onStop={async () => {
           try {
+            setHint("正在保存…");
             const path = await api.stopRecording();
-            setHint(`已保存 → ${path}`);
+            if (path) setHint(`已保存 → ${path}`);
           } catch (e) {
             setHint(`错误: ${e}`);
           }
