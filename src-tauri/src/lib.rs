@@ -291,7 +291,7 @@ fn toggle_pause(app: &AppHandle) {
     let rec = st.recorder.lock().unwrap().clone();
     if let Some(rec) = rec {
         if rec.progress().state == State::Paused {
-            let _ = rec.resume();
+            rec.resume();
         } else {
             rec.pause();
         }

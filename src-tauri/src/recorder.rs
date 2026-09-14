@@ -96,7 +96,7 @@ impl Recorder {
             codec: opts.codec.clone(),
             bitrate_kbps: opts.bitrate_kbps,
             rate_mode: opts.rate_mode.clone(),
-            audio: audio_params.clone(),
+            audio: audio_params,
         };
 
         let state = Arc::new(Mutex::new(State::Recording));

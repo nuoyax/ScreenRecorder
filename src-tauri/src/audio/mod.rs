@@ -58,8 +58,7 @@ fn get_client(loopback: bool) -> windows::core::Result<(IAudioClient, windows::W
             )?
         };
         let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
-        let flags = windows::Win32::Media::Audio::AUDCLNT_STREAMFLAGS_LOOPBACK * (loopback as u32)
-            | windows::Win32::Media::Audio::AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+        let flags = (windows::Win32::Media::Audio::AUDCLNT_STREAMFLAGS_LOOPBACK * (loopback as u32)) | windows::Win32::Media::Audio::AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
         let wf_ptr = client.GetMixFormat()?;
         let wf = *wf_ptr;
         client.Initialize(
