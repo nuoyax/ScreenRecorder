@@ -17,6 +17,8 @@ pub struct EncoderConfig {
     pub bitrate_kbps: u32,
     pub rate_mode: String,  // "vbr" | "cbr"
     pub audio: Option<AudioParams>,
+    /// MFVideoFormat subtype GUID for input frames (default RGB32)
+    pub input_bgra: bool,
 }
 
 pub struct SinkEncoder {
@@ -77,13 +79,13 @@ impl SinkEncoder {
             hr(vt_out.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)).map_err(|e| e.clone())?;
             hr(vt_out.SetGUID(&MF_MT_SUBTYPE, &video_sub)).map_err(|e| e.clone())?;
             hr(vt_out.SetUINT32(&MF_MT_AVG_BITRATE, cfg.bitrate_kbps * 1000)).map_err(|e| e.clone())?;
+            hr(vt_out.SetUINT32(&MF_MT_MPEG2_LEVEL, 40 /* L4.0 */)).map_err(|e| e.clone())?;
+            hr(vt_out.SetUINT32(&MF_MT_MPEG2_PROFILE, 100 /* High */)).map_err(|e| e.clone())?;
             hr(vt_out.SetUINT64(&MF_MT_FRAME_SIZE, pack_u64(cfg.width as u64, cfg.height as u64)))
                 .map_err(|e| e.clone())?;
             hr(vt_out.SetUINT64(&MF_MT_FRAME_RATE, pack_u64(cfg.fps as u64, 1)))
                 .map_err(|e| e.clone())?;
             hr(vt_out.SetUINT32(&MF_MT_INTERLACE_MODE, 2 /* progressive */))
-                .map_err(|e| e.clone())?;
-            hr(vt_out.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack_u64(1, 1)))
                 .map_err(|e| e.clone())?;
 
             let video_stream: u32 = hr(writer.AddStream(&vt_out)).map_err(|e| e.clone())?;
@@ -91,16 +93,11 @@ impl SinkEncoder {
             // ---------- video input type (BGRA) ----------
             let vt_in: IMFMediaType = hr(MFCreateMediaType()).map_err(|e| e.clone())?;
             hr(vt_in.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)).map_err(|e| e.clone())?;
-            // BGRA = MFVideoFormat_ARGB32 subtype for uncompressed input
-            hr(vt_in.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_ARGB32)).map_err(|e| e.clone())?;
+            hr(vt_in.SetGUID(&MF_MT_SUBTYPE, if cfg.input_bgra { &MFVideoFormat_ARGB32 } else { &MFVideoFormat_NV12 })).map_err(|e| e.clone())?;
             hr(vt_in.SetUINT64(&MF_MT_FRAME_SIZE, pack_u64(cfg.width as u64, cfg.height as u64)))
                 .map_err(|e| e.clone())?;
             hr(vt_in.SetUINT64(&MF_MT_FRAME_RATE, pack_u64(cfg.fps as u64, 1)))
                 .map_err(|e| e.clone())?;
-            hr(vt_in.SetUINT32(&MF_MT_INTERLACE_MODE, 2)).map_err(|e| e.clone())?;
-            hr(vt_in.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack_u64(1, 1)))
-                .map_err(|e| e.clone())?;
-            hr(vt_in.SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 1)).map_err(|e| e.clone())?;
             hr(writer.SetInputMediaType(video_stream, &vt_in, None)).map_err(|e| e.clone())?;
 
             // ---------- audio (optional, AAC) ----------
@@ -158,15 +155,37 @@ impl SinkEncoder {
             std::ptr::copy_nonoverlapping(bgra.as_ptr(), ptr, buf_size);
             media_buf.Unlock().map_err(|e| e.to_string())?;
             media_buf.SetCurrentLength(buf_size as u32).map_err(|e| e.to_string())?;
-
             let sample: IMFSample = hr(MFCreateSample()).map_err(|e| e.to_string())?;
             sample.AddBuffer(&media_buf).map_err(|e| e.to_string())?;
-            let ts = (ts_us / 10) as i64;
+            let ts = (ts_us * 10) as i64; // microseconds → 100ns units
+            sample.SetSampleTime(ts).map_err(|e| e.to_string())?;
+            // duration omitted — let the encoder/muxer derive from frame rate
+            sample.SetSampleDuration(self.frame_duration).map_err(|e| e.to_string())?;
+            let r = self.writer.WriteSample(self.video_stream, &sample);
+            r.map_err(|e| e.to_string())
+        }
+    }
+
+    /// Write one NV12 frame at ts_us.
+    pub fn write_video_nv12(&self, nv12: &[u8], width: u32, height: u32, ts_us: u64) -> Result<(), String> {
+        unsafe {
+            let buf_size = (width * height * 3 / 2) as usize;
+            if nv12.len() < buf_size {
+                return Err("nv12 buffer too small".into());
+            }
+            let media_buf: IMFMediaBuffer =
+                hr(MFCreateMemoryBuffer(buf_size as u32)).map_err(|e| e.to_string())?;
+            let mut ptr = std::ptr::null_mut::<u8>();
+            media_buf.Lock(&mut ptr, None, None).map_err(|e| e.to_string())?;
+            std::ptr::copy_nonoverlapping(nv12.as_ptr(), ptr, buf_size);
+            media_buf.Unlock().map_err(|e| e.to_string())?;
+            media_buf.SetCurrentLength(buf_size as u32).map_err(|e| e.to_string())?;
+            let sample: IMFSample = hr(MFCreateSample()).map_err(|e| e.to_string())?;
+            sample.AddBuffer(&media_buf).map_err(|e| e.to_string())?;
+            let ts = (ts_us * 10) as i64;
             sample.SetSampleTime(ts).map_err(|e| e.to_string())?;
             sample.SetSampleDuration(self.frame_duration).map_err(|e| e.to_string())?;
-            self.writer
-                .WriteSample(self.video_stream, &sample)
-                .map_err(|e| e.to_string())
+            self.writer.WriteSample(self.video_stream, &sample).map_err(|e| e.to_string())
         }
     }
 
@@ -186,19 +205,39 @@ impl SinkEncoder {
 
             let sample: IMFSample = hr(MFCreateSample()).map_err(|e| e.to_string())?;
             sample.AddBuffer(&media_buf).map_err(|e| e.to_string())?;
-            sample.SetSampleTime((ts_us / 10) as i64).map_err(|e| e.to_string())?;
+            sample.SetSampleTime((ts_us * 10) as i64).map_err(|e| e.to_string())?;
             self.writer
                 .WriteSample(self.audio_stream, &sample)
                 .map_err(|e| e.to_string())
         }
     }
 
+    pub fn dump_stats(&self) {
+        unsafe {
+            let mut st = MF_SINK_WRITER_STATISTICS {
+                cb: std::mem::size_of::<MF_SINK_WRITER_STATISTICS>() as u32,
+                ..Default::default()
+            };
+            if self.writer.GetStatistics(self.video_stream, &mut st).is_ok() {
+                eprintln!(
+                    "STATS: received={} encoded={} processed={} queued_bytes={} processed_bytes={}",
+                    st.qwNumSamplesReceived,
+                    st.qwNumSamplesEncoded,
+                    st.qwNumSamplesProcessed,
+                    st.dwByteCountQueued,
+                    st.qwByteCountProcessed
+                );
+            } else {
+                eprintln!("STATS: GetStatistics failed");
+            }
+        }
+    }
+
     pub fn finish(self) -> Result<(), String> {
         unsafe {
-            self.writer.Flush(self.video_stream).map_err(|e| e.to_string())?;
-            if self.audio_stream != u32::MAX {
-                let _ = self.writer.Flush(self.audio_stream);
-            }
+            self.writer
+                .Flush(MF_SINK_WRITER_ALL_STREAMS.0)
+                .map_err(|e| e.to_string())?;
             self.writer.Finalize().map_err(|e| e.to_string())?;
         }
         mf_shutdown();

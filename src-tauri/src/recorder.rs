@@ -97,6 +97,7 @@ impl Recorder {
             bitrate_kbps: opts.bitrate_kbps,
             rate_mode: opts.rate_mode.clone(),
             audio: audio_params,
+            input_bgra: true,
         };
 
         let state = Arc::new(Mutex::new(State::Recording));
@@ -142,7 +143,9 @@ impl Recorder {
                 }
             };
             // write first frame
-            let _ = enc.write_video(&first.data, w, h, 0);
+            if let Err(e) = enc.write_video(&first.data, w, h, 0) {
+                eprintln!("encoder write_video(first): {e}");
+            }
             let frame_duration_us = 1_000_000u64 / opts.fps.max(1) as u64;
             frame_count2.fetch_add(1, Ordering::SeqCst);
             let mut last_ts = 0u64;
@@ -171,7 +174,9 @@ impl Recorder {
                             ts = last_ts + 1;
                         }
                         last_ts = ts;
-                        let _ = enc.write_video(&f.data, f.width, f.height, ts);
+                        if let Err(e) = enc.write_video(&f.data, f.width, f.height, ts) {
+                            eprintln!("encoder write_video: {e}");
+                        }
                         frame_count2.fetch_add(1, Ordering::SeqCst);
                         file_size2.store(
                             std::fs::metadata(&out_path2).map(|m| m.len()).unwrap_or(0),

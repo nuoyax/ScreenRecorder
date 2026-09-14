@@ -108,6 +108,7 @@ fn run_capture(
         let bytes_per_frame = wf.nBlockAlign as usize;
 
         let mut pos: f64 = 0.0; // output sample position (in input-frame units)
+        let mut out_sample_idx: u64 = 0; // cumulative output samples (monotonic ts)
         let mut carry: Vec<f32> = Vec::new(); // input frames as (l, r) f32 pairs
 
         while !stop.load(Ordering::SeqCst) {
@@ -159,7 +160,8 @@ fn run_capture(
                 let l = carry.get(i0).copied().unwrap_or(0.0);
                 let r = carry.get(i0 + 1).copied().unwrap_or(0.0);
                 let sample = (l * 0.5 + r * 0.5) * gain;
-                let ts_us = (pos / src_rate * 1e6) as u64;
+                let ts_us = out_sample_idx * 1_000_000 / OUT_RATE as u64;
+                out_sample_idx += 1;
                 if out_tx.send((sample, ts_us)).is_err() {
                     return Ok(());
                 }
