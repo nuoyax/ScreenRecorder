@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use windows::Foundation::{TimeSpan, TypedEventHandler};
+use windows::Foundation::TimeSpan;
 use windows::Graphics::Capture::{
     Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureSession,
 };
@@ -31,7 +31,9 @@ pub struct RawFrame {
 pub struct CaptureHandle {
     pub stop: Arc<AtomicBool>,
     pub paused: Arc<AtomicBool>,
-    join: Option<std::thread::JoinHandle<()>>,
+    pub join: Option<std::thread::JoinHandle<()>>,
+    /// keep pool/session alive for the capture lifetime
+    pub _keep: Option<(Direct3D11CaptureFramePool, GraphicsCaptureSession)>,
 }
 
 impl CaptureHandle {
@@ -49,7 +51,7 @@ pub enum SourceKind {
     Window(isize),
 }
 
-fn create_d3d_device() -> windows::core::Result<(ID3D11Device, windows::Graphics::DirectX::Direct3D11::IDirect3DDevice)> {
+pub fn create_d3d_device() -> windows::core::Result<(ID3D11Device, windows::Graphics::DirectX::Direct3D11::IDirect3DDevice)> {
     unsafe {
         let mut device: Option<ID3D11Device> = None;
         let mut ctx: Option<ID3D11DeviceContext> = None;
@@ -80,6 +82,14 @@ pub fn start_capture(
     region: Option<(i32, i32, u32, u32)>,
     frame_tx: crossbeam_channel::Sender<RawFrame>,
 ) -> windows::core::Result<CaptureHandle> {
+    // WGC requires an initialized WinRT/COM apartment before any capture API use.
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_MULTITHREADED,
+        );
+    }
+
     let item = match source {
         SourceKind::Monitor(ref id) => capture_item_for_monitor(id)?,
         SourceKind::Window(hwnd) => capture_item_for_window(hwnd)?,
@@ -96,15 +106,6 @@ pub fn start_capture(
         frame_size,
     )?;
     let session: GraphicsCaptureSession = pool.CreateCaptureSession(&item)?;
-    let _ = session.SetIsCursorCaptureEnabled(true);
-    if let Ok(newer) = windows::Foundation::Metadata::ApiInformation::IsPropertyPresent(
-        &windows::core::HSTRING::from("Windows.Graphics.Capture.GraphicsCaptureSession"),
-        &windows::core::HSTRING::from("IsBorderRequired"),
-    ) {
-        if newer {
-            let _ = session.SetIsBorderRequired(false);
-        }
-    }
 
     let stop = Arc::new(AtomicBool::new(false));
     let paused = Arc::new(AtomicBool::new(false));
@@ -115,34 +116,24 @@ pub fn start_capture(
     let item_w = frame_size.Width;
     let item_h = frame_size.Height;
 
-    let (surface_tx, surface_rx) = crossbeam_channel::bounded::<Direct3D11CaptureFrame>(4);
-
     session.StartCapture()?;
 
-    // FrameArrived handler token must stay alive for the pool's lifetime
-    let _handler_token = pool.FrameArrived(
-        &TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(            move |pool, _| -> windows::core::Result<()> {
-                if let Ok(frame) = pool.ok()?.TryGetNextFrame() {
-                    let _ = surface_tx.try_send(frame);
-                }
-                Ok(())
-            },
-        ),
-    )?;
+    // NOTE: we intentionally poll TryGetNextFrame from the worker thread instead of
+    // subscribing to FrameArrived — the event callback does not fire reliably in this
+    // (GNU toolchain) build, while polling works (verified by wgc_probe).
+    let pool2 = pool.clone();
 
     let device2 = d3d_device.clone();
+    // keep the capture item alive for the session's lifetime (dropping it stops
+    // frame delivery even though the session holds a reference)
     let join = std::thread::spawn(move || {
+        let _item_keep = item;
         while !stop2.load(Ordering::SeqCst) {
             if paused2.load(Ordering::SeqCst) {
-                while let Ok(f) = surface_rx.try_recv() {
-
-                    let _ = f.Close();
-
-                }
                 std::thread::sleep(std::time::Duration::from_millis(20));
                 continue;
             }
-            match surface_rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            match pool2.TryGetNextFrame() {
                 Ok(frame) => {
                     let ts_us = start_time.elapsed().as_micros() as u64;
                     if let Some(tex) = extract_texture(&frame) {
@@ -169,26 +160,27 @@ pub fn start_capture(
                     }
                     let _ = frame.Close();
                 }
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-                Err(_) => break,
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(8)),
             }
         }
     });
 
+    let keep_pool = pool.clone();
     Ok(CaptureHandle {
         stop,
         paused,
         join: Some(join),
+        _keep: Some((keep_pool, session)),
     })
 }
 
-struct TexWrap {
-    texture: ID3D11Texture2D,
-    width: u32,
-    height: u32,
+pub struct TexWrap {
+    pub texture: ID3D11Texture2D,
+    pub width: u32,
+    pub height: u32,
 }
 
-fn extract_texture(frame: &Direct3D11CaptureFrame) -> Option<TexWrap> {
+pub fn extract_texture(frame: &Direct3D11CaptureFrame) -> Option<TexWrap> {
     let surface = frame.Surface().ok()?;
     let access: windows::Win32::System::WinRT::Direct3D11::IDirect3DDxgiInterfaceAccess =
         surface.cast().ok()?;
@@ -204,7 +196,7 @@ fn extract_texture(frame: &Direct3D11CaptureFrame) -> Option<TexWrap> {
     }
 }
 
-fn read_texture(
+pub fn read_texture(
     device: &ID3D11Device,
     ctx: &ID3D11DeviceContext,
     tex: &ID3D11Texture2D,
@@ -243,7 +235,7 @@ fn read_texture(
 }
 
 /// Crop a BGRA buffer (clamped to bounds).
-fn crop(data: &[u8], w: u32, h: u32, x: i32, y: i32, cw: u32, ch: u32) -> Vec<u8> {
+pub fn crop(data: &[u8], w: u32, h: u32, x: i32, y: i32, cw: u32, ch: u32) -> Vec<u8> {
     let x = x.clamp(0, w as i32 - 1) as u32;
     let y = y.clamp(0, h as i32 - 1) as u32;
     let cw = cw.min(w - x).max(1);
