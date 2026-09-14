@@ -28,7 +28,6 @@ export default defineConfig({
       input: {
         main: resolve(__dirname, "index.html"),
         toolbar: resolve(__dirname, "toolbar.html"),
-        indicator: resolve(__dirname, "indicator.html"),
       },
     },
   },
