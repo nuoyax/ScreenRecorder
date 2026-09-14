@@ -7,6 +7,11 @@ edition = "2021"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# Local patch: mingw windres' default gcc popen preprocessing fails in this
+# environment; force `--preprocessor=cat` (resource.rc is pre-generated plain).
+[patch.crates-io]
+embed-resource = { path = "target-check/embed-resource" }
+
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-global-shortcut = "2"

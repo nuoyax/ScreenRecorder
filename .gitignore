@@ -16,3 +16,9 @@ dist/
 # Recordings
 recordings/
 *.mp4
+
+# build debugging artifacts
+src-tauri/target-check/debug/
+
+# vendored patch + build debug tools
+src-tauri/target-check/

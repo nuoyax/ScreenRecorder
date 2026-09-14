@@ -16,7 +16,7 @@ pub struct Settings {
     pub scale_width: u32,
     /// "h264" | "h265"
     pub codec: String,
-    /// "low" | "medium" | "high" | custom bitrate
+    /// "low" | "medium" | "high" | "ultra" | custom bitrate
     pub quality: String,
     /// custom bitrate in kbps when quality == "custom"
     pub bitrate_kbps: u32,
@@ -97,12 +97,13 @@ pub fn bitrate_for(width: u32, height: u32, fps: u32, quality: &str, codec: &str
         "low" => pixels as f64 * 0.06,
         "medium" => pixels as f64 * 0.12,
         "high" => pixels as f64 * 0.22,
+        "ultra" => pixels as f64 * 0.55,
         "custom" => return custom.max(500),
         _ => pixels as f64 * 0.22,
     };
-    let mut kbps = base * (fps as f64 / 30.0).clamp(0.5, 2.0);
+    let mut kbps = base * (fps as f64 / 30.0).clamp(0.5, 2.5);
     if codec == "h265" {
-        kbps *= 0.65; // HEVC needs ~35% less for same quality
+        kbps *= 0.7; // HEVC needs ~30% less for same quality
     }
-    (kbps as u32).clamp(1000, 120_000)
+    (kbps as u32).clamp(1000, 240_000)
 }
