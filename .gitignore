@@ -1,0 +1,18 @@
+# AI OS local config — never commit
+.claude/
+CLAUDE.md
+.mcp.json
+.claudeignore
+
+# Rust / Tauri
+target/
+src-tauri/target/
+src-tauri/gen/
+
+# Node
+node_modules/
+dist/
+
+# Recordings
+recordings/
+*.mp4
