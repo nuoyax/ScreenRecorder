@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>RecordingIndicator</title>
+<style>
+  * { margin: 0; padding: 0; }
+  body { background: transparent; overflow: hidden; }
+  #dot {
+    width: 22px; height: 22px; margin: 6px; border-radius: 50%;
+    background: #ef4444; box-shadow: 0 0 10px 2px rgba(239,68,68,.7);
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  #dot.paused { background: #d97706; box-shadow: 0 0 10px 2px rgba(217,119,6,.7); animation: none; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+</style>
+</head>
+<body>
+<div id="dot"></div>
+<script>
+const listen = window.__TAURI__.event.listen;
+const { getCurrentWindow } = window.__TAURI__.window;
+const $ = document.getElementById('dot');
+const win = getCurrentWindow();
+
+listen('recording-progress', e => {
+  const p = e.payload;
+  if (p.state === 'recording' || p.state === 'paused') {
+    $.className = p.state === 'paused' ? 'paused' : '';
+    win.show();
+  } else {
+    win.hide();
+  }
+});
+</script>
+</body>
+</html>

@@ -247,6 +247,62 @@ pub fn run() {
             let s = settings::load(&handle);
             *handle.state::<AppState>().settings.lock().unwrap() = s.clone();
 
+            // floating toolbar (always-on-top, frameless, small) pinned bottom-right,
+            // excluded from screen capture so it never appears in recordings
+            let toolbar = tauri::WebviewWindowBuilder::new(
+                app,
+                "toolbar",
+                tauri::WebviewUrl::App("toolbar.html".into()),
+            )
+            .title("Toolbar")
+            .inner_size(250.0, 56.0)
+            .decorations(false)
+            .always_on_top(true)
+            .resizable(false)
+            .skip_taskbar(true)
+            .transparent(true)
+            .build();
+            if let Ok(tb) = toolbar {
+                let _ = pin_bottom_right(&tb);
+                let _ = tb.set_focus();
+                // WDA_EXCLUDEFROMCAPTURE: keep the toolbar out of recorded frames
+                unsafe {
+                    use windows::Win32::UI::WindowsAndMessaging::{
+                        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
+                    };
+                    if let Ok(hwnd) = tb.hwnd() {
+                        let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+                    }
+                }
+            }
+
+            // recording indicator (top-left red dot), also excluded from capture
+            let indicator = tauri::WebviewWindowBuilder::new(
+                app,
+                "indicator",
+                tauri::WebviewUrl::App("indicator.html".into()),
+            )
+            .title("RecordingIndicator")
+            .inner_size(34.0, 34.0)
+            .decorations(false)
+            .always_on_top(true)
+            .resizable(false)
+            .skip_taskbar(true)
+            .transparent(true)
+            .visible(false)
+            .build();
+            if let Ok(ind) = indicator {
+                unsafe {
+                    use windows::Win32::UI::WindowsAndMessaging::{
+                        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
+                    };
+                    if let Ok(hwnd) = ind.hwnd() {
+                        let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+                    }
+                }
+            }
+            let _ = indicator;
+
             // progress emitter
             let h2 = handle.clone();
             std::thread::spawn(move || loop {
@@ -296,4 +352,15 @@ fn toggle_pause(app: &AppHandle) {
             rec.pause();
         }
     }
+}
+
+/// Position a window at the bottom-right of the primary monitor's work area.
+fn pin_bottom_right(w: &tauri::WebviewWindow) -> tauri::Result<()> {
+    let mon = w
+        .current_monitor()?
+        .ok_or(tauri::Error::WindowNotFound)?;
+    let size = w.outer_size()?;
+    let x = mon.position().x + mon.size().width as i32 - size.width as i32 - 24;
+    let y = mon.position().y + mon.size().height as i32 - size.height as i32 - 24;
+    w.set_position(tauri::PhysicalPosition::new(x, y))
 }
