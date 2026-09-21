@@ -15,6 +15,8 @@ export type Settings = {
   rate_mode: string;
   record_system_audio: boolean;
   record_microphone: boolean;
+  /** WASAPI endpoint id; empty string = system default microphone */
+  mic_device: string;
   system_volume: number;
   mic_volume: number;
   output_dir: string | null;
@@ -47,6 +49,12 @@ export type MonitorInfo = {
 export type WindowInfo = {
   hwnd: number;
   title: string;
+};
+
+export type MicrophoneInfo = {
+  id: string;
+  name: string;
+  is_default: boolean;
 };
 
 export type SourceLists = {
@@ -93,6 +101,7 @@ export const api = {
   stopRecording: () => invoke<string>("stop_recording"),
   recordingProgress: () => invoke<Progress | null>("recording_progress"),
   listRecordings: () => invoke<HistoryEntry[]>("list_recordings"),
+  listMicrophones: () => invoke<MicrophoneInfo[]>("list_microphones"),
   /** `null` when the recording has no cursor track (sampling was off). */
   loadMouseTrack: (videoPath: string) =>
     invoke<MouseTrack | null>("load_mouse_track", { videoPath }),

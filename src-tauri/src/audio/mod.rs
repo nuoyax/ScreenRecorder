@@ -7,10 +7,22 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use windows::Win32::Media::Audio::{IAudioCaptureClient, IAudioClient};
-use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+use windows::Win32::Media::Audio::{
+    eCapture, eRender, IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator,
+    MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
 };
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
+};
+
+/// An audio capture device the user can pick from.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MicrophoneInfo {
+    /// WASAPI endpoint id — pass back as `mic_device` to capture from this device.
+    pub id: String,
+    pub name: String,
+    pub is_default: bool,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct AudioParams {
@@ -42,21 +54,90 @@ fn com_init() {
     }
 }
 
-fn get_client(loopback: bool) -> windows::core::Result<(IAudioClient, windows::Win32::Media::Audio::WAVEFORMATEX)> {
+fn device_friendly_name(device: &IMMDevice) -> Option<String> {
     unsafe {
-        let enumerator: windows::Win32::Media::Audio::IMMDeviceEnumerator =
-            CoCreateInstance(&windows::Win32::Media::Audio::MMDeviceEnumerator, None, CLSCTX_ALL)?;
-        let device = if loopback {
-            enumerator.GetDefaultAudioEndpoint(
-                windows::Win32::Media::Audio::EDataFlow(0), // eRender
-                windows::Win32::Media::Audio::ERole(1),     // eConsole (multimedia)
-            )?
-        } else {
-            enumerator.GetDefaultAudioEndpoint(
-                windows::Win32::Media::Audio::EDataFlow(1), // eCapture
-                windows::Win32::Media::Audio::ERole(1),
-            )?
+        let store = device.OpenPropertyStore(STGM_READ).ok()?;
+        let prop = store
+            .GetValue(&windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName)
+            .ok()?;
+        let pwstr = windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc(&prop)
+            .ok()?;
+        let s = pwstr.to_string().ok()?;
+        windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.0 as *const _));
+        Some(s)
+    }
+}
+
+fn take_id(p: windows::core::PWSTR) -> String {
+    let s = unsafe { p.to_string() }.unwrap_or_default();
+    unsafe { windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as *const _)) };
+    s
+}
+
+/// Every active capture endpoint on the system, labelled with its friendly name.
+///
+/// A device whose name cannot be read is still listed (labelled with its endpoint
+/// id) rather than hidden, since it may still be worth recording from.
+pub fn list_microphones() -> Vec<MicrophoneInfo> {
+    com_init();
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("[audio] device enumeration failed: {e}");
+                    return Vec::new();
+                }
+            };
+        let collection = match enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[audio] EnumAudioEndpoints failed: {e}");
+                return Vec::new();
+            }
         };
+        let default_id = enumerator
+            .GetDefaultAudioEndpoint(eCapture, windows::Win32::Media::Audio::ERole(1))
+            .ok()
+            .and_then(|d| d.GetId().ok())
+            .map(take_id);
+
+        let count = collection.GetCount().unwrap_or(0);
+        let mut out = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let Ok(dev) = collection.Item(i) else { continue };
+            let Ok(raw_id) = dev.GetId() else { continue };
+            let id = take_id(raw_id);
+            let name = device_friendly_name(&dev).unwrap_or_else(|| id.clone());
+            let is_default = default_id.as_deref() == Some(id.as_str());
+            out.push(MicrophoneInfo { id, name, is_default });
+        }
+        out
+    }
+}
+
+/// Resolve the device to capture from: an explicit endpoint id, or the system default.
+fn resolve_device(
+    enumerator: &IMMDeviceEnumerator,
+    loopback: bool,
+    device_id: Option<&str>,
+) -> windows::core::Result<IMMDevice> {
+    if let Some(id) = device_id.filter(|s| !s.is_empty()) {
+        let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
+        let h = windows::core::PCWSTR(wide.as_ptr());
+        return unsafe { enumerator.GetDevice(h) };
+    }
+    let flow = if loopback { eRender } else { eCapture };
+    unsafe { enumerator.GetDefaultAudioEndpoint(flow, windows::Win32::Media::Audio::ERole(1)) }
+}
+
+fn get_client(
+    loopback: bool,
+    device_id: Option<&str>,
+) -> windows::core::Result<(IAudioClient, windows::Win32::Media::Audio::WAVEFORMATEX)> {
+    unsafe {
+        let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+        let device = resolve_device(&enumerator, loopback, device_id)?;
         let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
         let flags = (windows::Win32::Media::Audio::AUDCLNT_STREAMFLAGS_LOOPBACK * (loopback as u32)) | windows::Win32::Media::Audio::AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
         let wf_ptr = client.GetMixFormat()?;
@@ -77,13 +158,14 @@ fn get_client(loopback: bool) -> windows::core::Result<(IAudioClient, windows::W
 /// OUT_RATE mono, applies gain, pushes (sample, ts_us) into `out_tx`.
 fn capture_thread(
     loopback: bool,
+    device_id: Option<String>,
     gain: f32,
     stop: Arc<AtomicBool>,
     out_tx: crossbeam_channel::Sender<(f32, u64)>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         com_init();
-        let _ = run_capture(loopback, gain, stop, out_tx);
+        let _ = run_capture(loopback, device_id.as_deref(), gain, stop, out_tx);
         unsafe {
             CoUninitialize();
         }
@@ -92,12 +174,13 @@ fn capture_thread(
 
 fn run_capture(
     loopback: bool,
+    device_id: Option<&str>,
     gain: f32,
     stop: Arc<AtomicBool>,
     out_tx: crossbeam_channel::Sender<(f32, u64)>,
 ) -> windows::core::Result<()> {
     unsafe {
-        let (client, wf) = get_client(loopback)?;
+        let (client, wf) = get_client(loopback, device_id)?;
         let capture: IAudioCaptureClient = client.GetService()?;
         let event = windows::Win32::System::Threading::CreateEventW(None, false, false, None)?;
         client.SetEventHandle(event)?;
@@ -213,12 +296,16 @@ fn mixer_thread(
     })
 }
 
-/// Start audio capture. `sys_gain`/`mic_gain` in 0.0..2.0.
+/// Start audio capture. `sys_gain`/`mic_gain` in 0.0..2.0. `mic_device` is a WASAPI
+/// endpoint id from `list_microphones`; None (or empty) means the system default.
+/// The loopback side always uses the default render endpoint — that is what "system
+/// audio" means, and there is no separate device to browse for it.
 pub fn start_audio(
     record_system: bool,
     record_mic: bool,
     sys_gain: f32,
     mic_gain: f32,
+    mic_device: Option<String>,
 ) -> Result<AudioHandle, String> {
     if !record_system && !record_mic {
         return Err("no audio source enabled".into());
@@ -229,10 +316,10 @@ pub fn start_audio(
 
     let mut join = Vec::new();
     if record_system {
-        join.push(capture_thread(true, sys_gain, stop.clone(), sample_tx.clone()));
+        join.push(capture_thread(true, None, sys_gain, stop.clone(), sample_tx.clone()));
     }
     if record_mic {
-        join.push(capture_thread(false, mic_gain, stop.clone(), sample_tx.clone()));
+        join.push(capture_thread(false, mic_device, mic_gain, stop.clone(), sample_tx.clone()));
     }
     join.push(mixer_thread(sample_rx, pcm_tx, stop.clone()));
     drop(sample_tx);

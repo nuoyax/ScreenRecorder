@@ -41,6 +41,8 @@ pub struct RecorderOptions {
     pub rate_mode: String,
     pub output_path: PathBuf,
     pub audio: Option<(bool, bool, f32, f32)>, // sys, mic, sys_gain, mic_gain
+    /// WASAPI endpoint id for the microphone; None = system default
+    pub mic_device: Option<String>,
     pub show_cursor: bool,
     /// observe cursor position + clicks while recording; off means no sidecar file
     pub sample_mouse: bool,
@@ -114,7 +116,7 @@ impl Recorder {
 
         let audio_handle = match &opts.audio {
             Some((sys, mic, sg, mg)) if *sys || *mic => Some(
-                audio::start_audio(*sys, *mic, *sg, *mg)
+                audio::start_audio(*sys, *mic, *sg, *mg, opts.mic_device.clone())
                     .map_err(|e| format!("audio init failed: {e}"))?,
             ),
             _ => None,

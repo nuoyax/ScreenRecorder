@@ -169,6 +169,11 @@ fn start_recording(app: AppHandle, ctx: Ctx) -> Result<String, String> {
         rate_mode: s.rate_mode.clone(),
         output_path: out_path.clone(),
         audio,
+        mic_device: if s.mic_device.is_empty() {
+            None
+        } else {
+            Some(s.mic_device.clone())
+        },
         show_cursor: s.show_cursor,
         // Sample whenever the cursor is hidden (so the editor can draw its own) or the
         // user asked for click highlights. Sampling costs a poll thread, nothing more.
@@ -296,6 +301,11 @@ fn list_recordings(app: AppHandle, ctx: Ctx) -> Vec<HistoryEntry> {
 }
 
 #[tauri::command]
+fn list_microphones() -> Vec<audio::MicrophoneInfo> {
+    audio::list_microphones()
+}
+
+#[tauri::command]
 fn open_file(path: String) -> Result<(), String> {
     std::process::Command::new("explorer")
         .arg("/select,")
@@ -334,6 +344,7 @@ pub fn run() {
             stop_recording,
             recording_progress,
             list_recordings,
+            list_microphones,
             open_file,
             load_mouse_track,
             quit_app

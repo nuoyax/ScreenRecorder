@@ -24,6 +24,8 @@ pub struct Settings {
  pub rate_mode: String,
     pub record_system_audio: bool,
     pub record_microphone: bool,
+    /// WASAPI endpoint id of the microphone to capture; empty = system default.
+    pub mic_device: String,
     pub system_volume: f32,
     pub mic_volume: f32,
     pub output_dir: Option<PathBuf>,
@@ -53,6 +55,7 @@ impl Default for Settings {
             rate_mode: "vbr".into(),
             record_system_audio: true,
             record_microphone: false,
+            mic_device: String::new(),
             system_volume: 1.0,
             mic_volume: 1.0,
             output_dir: None,

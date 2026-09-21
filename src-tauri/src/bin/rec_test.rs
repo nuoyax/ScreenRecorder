@@ -10,6 +10,26 @@ use std::time::Duration;
 fn main() {
     let mons = enumerate_monitors();
     println!("monitors: {mons:?}");
+    let mics = screen_recorder::audio::list_microphones();
+    println!("microphones: {} found", mics.len());
+    for m in &mics {
+        println!(
+            "  - {}{} [{}]",
+            m.name,
+            if m.is_default { " (default)" } else { "" },
+            &m.id[..m.id.len().min(48)]
+        );
+    }
+    if mics.is_empty() {
+        panic!("FAIL: no capture endpoints enumerated");
+    }
+    if mics.iter().any(|m| m.name.is_empty()) {
+        panic!("FAIL: a microphone came back with an empty name");
+    }
+    if mics.iter().filter(|m| m.is_default).count() != 1 {
+        panic!("FAIL: expected exactly one default microphone");
+    }
+
     let first = mons.first().expect("no monitor found");
     let out = std::env::temp_dir().join("rec_test_output.mp4");
     let _ = std::fs::remove_file(&out);
@@ -30,6 +50,7 @@ fn main() {
         rate_mode: "vbr".into(),
         output_path: out.clone(),
         audio: if std::env::var("REC_NO_AUDIO").is_ok() { None } else { Some((true, false, 1.0, 1.0)) },
+        mic_device: None,
         // REC_NO_CURSOR=1 records without the OS cursor, mirroring the UI toggle.
         show_cursor: std::env::var("REC_NO_CURSOR").is_err(),
         sample_mouse: true,

@@ -13,7 +13,7 @@ import {
 } from "antd";
 import { Transport } from "@/components/Transport";
 import { CountdownOverlay } from "@/components/CountdownOverlay";
-import { api, type HistoryEntry, type Settings, type SourceLists } from "@/lib/api";
+import { api, type HistoryEntry, type Settings, type SourceLists, type MicrophoneInfo } from "@/lib/api";
 import { fileName, formatDuration } from "@/lib/format";
 import { useCountdown } from "@/hooks/useCountdown";
 import { useRecordingState } from "@/hooks/useRecordingState";
@@ -32,6 +32,7 @@ const defaultSettings = (): Settings => ({
   rate_mode: "vbr",
   record_system_audio: true,
   record_microphone: false,
+  mic_device: "",
   system_volume: 1,
   mic_volume: 1,
   output_dir: null,
@@ -49,6 +50,7 @@ export function MainPage() {
   const countdown = useCountdown();
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const [sources, setSources] = useState<SourceLists | null>(null);
+  const [mics, setMics] = useState<MicrophoneInfo[]>([]);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [hint, setHint] = useState("");
   const skipSave = useRef(true);
@@ -62,6 +64,7 @@ export function MainPage() {
       const s = await api.getSettings();
       setSettings({ ...defaultSettings(), ...s, region: s.region ?? [0, 0, 1280, 720] });
       setSources(await api.listSources());
+      setMics(await api.listMicrophones());
       setHistory(await api.listRecordings());
       skipSave.current = false;
     })();
@@ -356,6 +359,20 @@ export function MainPage() {
             onChange={(v) => patch({ record_microphone: v })}
           />
         </Field>
+        {settings.record_microphone && (
+          <Field label="输入设备">
+            <Select
+              className="w-full max-w-[200px]"
+              value={settings.mic_device || undefined}
+              placeholder="系统默认"
+              options={mics.map((m) => ({
+                value: m.id,
+                label: `${m.name}${m.is_default ? "（默认）" : ""}`,
+              }))}
+              onChange={(v) => patch({ mic_device: v })}
+            />
+          </Field>
+        )}
         <Field label="麦克风音量">
           <Slider
             className="m-0 w-[120px]"
