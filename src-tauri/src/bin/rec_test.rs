@@ -32,6 +32,7 @@ fn main() {
         audio: if std::env::var("REC_NO_AUDIO").is_ok() { None } else { Some((true, false, 1.0, 1.0)) },
         // REC_NO_CURSOR=1 records without the OS cursor, mirroring the UI toggle.
         show_cursor: std::env::var("REC_NO_CURSOR").is_err(),
+        sample_mouse: true,
         max_duration: Some(Duration::from_secs(6)),
         max_file_mb: None,
     })
@@ -43,15 +44,44 @@ fn main() {
         println!("[{i}s] state={:?} dur={:.1}s frames={} mb={:.2}", p.state, p.duration_secs, p.frames, p.file_mb);
     }
 
-    let stop_flag = rec.stop_flag();
-    stop_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-    // drop our Arc so try_unwrap-style teardown can proceed; just leak it here
-    std::mem::forget(rec);
-    std::thread::sleep(Duration::from_secs(3));
+    // Drive the real teardown path so the smoke test covers what stop_recording does
+    // in the app: finalize the MP4 and write the mouse sidecar.
+    let rec = std::sync::Arc::try_unwrap(rec).unwrap_or_else(|_| {
+        panic!("FAIL: recorder Arc still shared; drop other handles before stopping")
+    });
+    match rec.stop() {
+        Some(p) => println!("STOPPED: {}", p.display()),
+        None => panic!("FAIL: stop() returned no path"),
+    }
 
     let meta = std::fs::metadata(&out);
     match meta {
         Ok(m) => println!("OK: {} = {:.2} MB", out.display(), m.len() as f64 / 1048576.0),
         Err(e) => panic!("FAIL: output missing: {e}"),
+    }
+
+    let sidecar = screen_recorder::input::mouse::sidecar_path(&out);
+    match screen_recorder::input::mouse::load_sidecar(&sidecar) {
+        Some(t) => {
+            if t.moves.is_empty() {
+                panic!("FAIL: sidecar has no cursor samples");
+            }
+            let mut last = 0u64;
+            for m in &t.moves {
+                if m.t_us < last {
+                    panic!("FAIL: sidecar timestamps not monotonic");
+                }
+                last = m.t_us;
+            }
+            println!(
+                "MOUSE: {} moves, {} clicks, interval={}us, span={:.1}s → {}",
+                t.moves.len(),
+                t.clicks.len(),
+                t.interval_us,
+                last as f64 / 1e6,
+                sidecar.display()
+            );
+        }
+        None => panic!("FAIL: no sidecar at {}", sidecar.display()),
     }
 }

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use crate::audio::{self, AudioHandle};
 use crate::capture::wgc::{self, RawFrame, SourceKind};
 use crate::encoder::{EncoderConfig, SinkEncoder};
+use crate::input::mouse::MouseSampler;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -41,6 +42,8 @@ pub struct RecorderOptions {
     pub output_path: PathBuf,
     pub audio: Option<(bool, bool, f32, f32)>, // sys, mic, sys_gain, mic_gain
     pub show_cursor: bool,
+    /// observe cursor position + clicks while recording; off means no sidecar file
+    pub sample_mouse: bool,
     pub max_duration: Option<Duration>,
     pub max_file_mb: Option<u64>,
 }
@@ -55,6 +58,7 @@ pub struct Recorder {
     worker: Option<std::thread::JoinHandle<()>>,
     audio: Option<AudioHandle>,
     capture: Option<wgc::CaptureHandle>,
+    mouse: Option<MouseSampler>,
     pub result_path: PathBuf,
     frame_count: Arc<AtomicU64>,
     start_us: u64,
@@ -92,13 +96,21 @@ fn frame_at_size(f: RawFrame, w: u32, h: u32) -> RawFrame {
 
 impl Recorder {
     pub fn start(opts: RecorderOptions) -> Result<Arc<Recorder>, String> {
-        // Shared clock for the whole recording. Capture frames, audio, and auxiliary
-        // samples all timestamp against this, so they can be compared without
-        // guessing at start-time offsets between threads.
-        let origin = Instant::now();
         let (frame_tx, frame_rx) = crossbeam_channel::bounded::<RawFrame>(8);
-        let capture = wgc::start_capture(opts.source.clone(), opts.region, origin, opts.show_cursor, frame_tx)
-            .map_err(|e| format!("capture init failed: {e}"))?;
+        // Capture hands back the clock its frames are stamped against; everything
+        // else in the recording measures against the same instant.
+        let (capture, origin) =
+            wgc::start_capture(opts.source.clone(), opts.region, opts.show_cursor, frame_tx)
+                .map_err(|e| format!("capture init failed: {e}"))?;
+
+        // Cursor/click observation shares the recording's clock, so a click lands on
+        // the frame it happened during. Sampling is also what lets the editor draw a
+        // cursor overlay when the OS cursor is excluded from the frames themselves.
+        let mouse = if opts.sample_mouse {
+            Some(MouseSampler::start(origin))
+        } else {
+            None
+        };
 
         let audio_handle = match &opts.audio {
             Some((sys, mic, sg, mg)) if *sys || *mic => Some(
@@ -143,10 +155,10 @@ impl Recorder {
         let file_size = Arc::new(AtomicU64::new(0));
         let frame_count = Arc::new(AtomicU64::new(0));
 
-        // clock base: video timestamps come from capture (its own Instant base);
-        // audio ts are audio-start-relative — we bridge by sending audio with an
-        // offset computed from the first audio chunk vs recording start.
-        let video_base_us = origin.elapsed().as_micros() as u64;
+        // clock base: capture stamps frames against the `origin` it returned, and the
+        // audio thread stamps against its own start. Audio's base is calibrated on
+        // its first chunk below; video needs no offset because it already starts at 0.
+        let _video_base_us = origin.elapsed().as_micros() as u64;
 
         let _audio_ref = audio_handle.as_ref();
         let audio_offset_us = Arc::new(AtomicU64::new(0));
@@ -239,7 +251,6 @@ impl Recorder {
                     }
                     Err(_) => break,
                 }
-                let _ = video_base_us;
             }
             // final audio drain
             if let Some(rx) = &mut audio_rx {
@@ -266,6 +277,7 @@ impl Recorder {
             worker: Some(worker),
             audio: audio_handle,
             capture: Some(capture),
+            mouse,
             result_path: out_path,
             frame_count,
             start_us: now_us(),
@@ -302,6 +314,28 @@ impl Recorder {
         }
         if let Some(a) = self.audio.take() {
             a.stop();
+        }
+        // Write the mouse track before joining the encoder worker: the sidecar is
+        // small, and having it on disk by the time `recording-saved` fires means the
+        // editor can load the recording and its overlay data in one step.
+        if let Some(m) = self.mouse.take() {
+            let track = m.stop();
+            let path = crate::input::mouse::sidecar_path(&self.result_path);
+            match serde_json::to_vec(&track) {
+                Ok(bytes) => {
+                    if let Err(e) = std::fs::write(&path, bytes) {
+                        eprintln!("[mouse] sidecar write failed: {e}");
+                    } else {
+                        eprintln!(
+                            "[mouse] {} moves, {} clicks → {}",
+                            track.moves.len(),
+                            track.clicks.len(),
+                            path.display()
+                        );
+                    }
+                }
+                Err(e) => eprintln!("[mouse] sidecar serialize failed: {e}"),
+            }
         }
         let path = self.result_path.clone();
         if let Some(w) = self.worker.take() {

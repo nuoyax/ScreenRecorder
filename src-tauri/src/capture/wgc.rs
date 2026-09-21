@@ -78,16 +78,18 @@ pub fn create_d3d_device() -> windows::core::Result<(ID3D11Device, windows::Grap
 /// Spawn a capture thread producing BGRA frames.
 ///
 /// `region` (x,y,w,h) is in capture-item coordinates; None = full item.
-/// `origin` is the recording's shared clock: every frame timestamp and every
-/// auxiliary sample is measured from it, so they are directly comparable.
 /// `show_cursor` toggles the OS-drawn cursor inside captured frames.
+///
+/// Returns the handle plus the clock the frames are timestamped against. The caller
+/// must use that same clock for anything it wants to align with the video: it is
+/// taken immediately before `StartCapture`, so frame timestamps start near zero and
+/// exclude capture setup latency.
 pub fn start_capture(
     source: SourceKind,
     region: Option<(i32, i32, u32, u32)>,
-    origin: std::time::Instant,
     show_cursor: bool,
     frame_tx: crossbeam_channel::Sender<RawFrame>,
-) -> windows::core::Result<CaptureHandle> {
+) -> windows::core::Result<(CaptureHandle, std::time::Instant)> {
     // WGC requires an initialized WinRT/COM apartment before any capture API use.
     unsafe {
         let _ = windows::Win32::System::Com::CoInitializeEx(
@@ -132,6 +134,10 @@ pub fn start_capture(
         eprintln!("[cap] border suppression unavailable ({e:#?})");
     }
 
+    // The clock starts here: after enumeration and device setup, immediately before
+    // the first frame can arrive. Computing it earlier would offset every timestamp
+    // (and every click aligned to it) by the capture startup latency.
+    let origin = std::time::Instant::now();
     session.StartCapture()?;
 
     // NOTE: we intentionally poll TryGetNextFrame from the worker thread instead of
@@ -182,12 +188,15 @@ pub fn start_capture(
     });
 
     let keep_pool = pool.clone();
-    Ok(CaptureHandle {
-        stop,
-        paused,
-        join: Some(join),
-        _keep: Some((keep_pool, session)),
-    })
+    Ok((
+        CaptureHandle {
+            stop,
+            paused,
+            join: Some(join),
+            _keep: Some((keep_pool, session)),
+        },
+        origin,
+    ))
 }
 
 pub struct TexWrap {

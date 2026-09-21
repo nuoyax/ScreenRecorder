@@ -2,6 +2,7 @@ pub mod audio;
 pub mod capture;
 pub mod encoder;
 pub mod image;
+pub mod input;
 pub mod recorder;
 pub mod settings;
 
@@ -169,6 +170,9 @@ fn start_recording(app: AppHandle, ctx: Ctx) -> Result<String, String> {
         output_path: out_path.clone(),
         audio,
         show_cursor: s.show_cursor,
+        // Sample whenever the cursor is hidden (so the editor can draw its own) or the
+        // user asked for click highlights. Sampling costs a poll thread, nothing more.
+        sample_mouse: !s.show_cursor || s.click_highlight,
         max_duration: if s.max_duration_secs > 0 {
             Some(std::time::Duration::from_secs(s.max_duration_secs as u64))
         } else {
@@ -301,6 +305,17 @@ fn open_file(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Cursor path + click track recorded alongside a video, if one exists.
+///
+/// Returns `None` for recordings made with cursor sampling disabled — the editor
+/// treats that as "no overlay data" rather than an error.
+#[tauri::command]
+fn load_mouse_track(video_path: String) -> Option<input::mouse::MouseTrack> {
+    input::mouse::load_sidecar(&input::mouse::sidecar_path(std::path::Path::new(
+        &video_path,
+    )))
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -320,6 +335,7 @@ pub fn run() {
             recording_progress,
             list_recordings,
             open_file,
+            load_mouse_track,
             quit_app
         ])
         .setup(|app| {

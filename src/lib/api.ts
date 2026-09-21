@@ -61,6 +61,27 @@ export type HistoryEntry = {
   modified: string;
 };
 
+/** One cursor position reading, in virtual-screen coordinates. */
+export type MoveSample = {
+  t_us: number;
+  x: number;
+  y: number;
+};
+
+export type ClickSample = MoveSample & {
+  button: "left" | "right" | string;
+};
+
+/**
+ * Cursor + click track recorded next to a video. `interval_us` is the sampling
+ * interval, so consumers know the resolution of the samples.
+ */
+export type MouseTrack = {
+  moves: MoveSample[];
+  clicks: ClickSample[];
+  interval_us: number;
+};
+
 export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) =>
@@ -72,6 +93,9 @@ export const api = {
   stopRecording: () => invoke<string>("stop_recording"),
   recordingProgress: () => invoke<Progress | null>("recording_progress"),
   listRecordings: () => invoke<HistoryEntry[]>("list_recordings"),
+  /** `null` when the recording has no cursor track (sampling was off). */
+  loadMouseTrack: (videoPath: string) =>
+    invoke<MouseTrack | null>("load_mouse_track", { videoPath }),
   openFile: (path: string) => invoke<void>("open_file", { path }),
   quitApp: () => invoke<void>("quit_app"),
   onProgress: (handler: (p: Progress) => void): Promise<UnlistenFn> =>
