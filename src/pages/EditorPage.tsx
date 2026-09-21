@@ -28,9 +28,12 @@ import {
 import { projectPathFor, sanitize, serialize } from "@/lib/editor/projects";
 import { drawFrame, type FrameSource } from "@/lib/editor/appearance";
 import { seekTo } from "@/lib/editor/playback";
+import { suggestZooms, type ZoomSuggestion } from "@/lib/editor/zoomSuggest";
 import { Timeline } from "@/components/editor/Timeline";
 import { ClipList } from "@/components/editor/ClipList";
 import { StylePanel } from "@/components/editor/StylePanel";
+import { ZoomControl } from "@/components/editor/ZoomControl";
+import { CropControl } from "@/components/editor/CropControl";
 import { AnnotationLayer } from "@/components/editor/AnnotationLayer";
 import { ExportPanel } from "@/components/editor/ExportPanel";
 import { DEFAULT_ZOOM_DEPTH } from "@/lib/timeline/types";
@@ -49,6 +52,9 @@ type Props = {
   onPickRecording: () => void;
 };
 
+/** Inspector tabs. `crop` and `zoom` share the "画面" page. */
+type Tab = "clips" | "frame" | "style" | "export";
+
 /**
  * Timeline editor for one recording.
  *
@@ -59,10 +65,12 @@ type Props = {
 export function EditorPage({ sourcePath, onBack, onPickRecording }: Props) {
   const [state, setState] = useState<EditorState | null>(null);
   const [error, setError] = useState("");
-  const [tab, setTab] = useState<"clips" | "style" | "export">("clips");
+  const [tab, setTab] = useState<Tab>("clips");
   const [selectedClip, setSelectedClip] = useState<string | null>(null);
   const [track, setTrack] = useState<MouseTrack | null>(null);
   const [playing, setPlaying] = useState(false);
+  /** Suggestions only when a track exists; `null` means "cannot suggest". */
+  const [suggestions, setSuggestions] = useState<ZoomSuggestion[] | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -131,10 +139,24 @@ export function EditorPage({ sourcePath, onBack, onPickRecording }: Props) {
         );
 
         const mouse = await api.loadMouseTrack(sourcePath);
-        if (!cancelled) {
-          setTrack(mouse);
-          if (!mouse) setError((e) => e || "该录制没有光标轨迹，预览不画光标");
-        }
+        if (cancelled) return;
+        setTrack(mouse);
+        if (!mouse) setError((e) => e || "该录制没有光标轨迹，预览不画光标");
+        // Suggestions are derived from the track, so they are computed once here rather
+        // than on every render — and they are *offered*, never applied.
+        setSuggestions(
+          mouse
+            ? suggestZooms(mouse.moves, {
+                capture: mouse.rect ?? {
+                  x: 0,
+                  y: 0,
+                  width: meta.width,
+                  height: meta.height,
+                },
+                durationMs: meta.durationMs,
+              })
+            : null,
+        );
       } catch (e) {
         if (!cancelled) setError(String(e));
       }
@@ -161,10 +183,11 @@ export function EditorPage({ sourcePath, onBack, onPickRecording }: Props) {
 
     // Seeking is what makes this frame the right one; while playing, the video element
     // is the clock instead and the browser hands us frames on its own.
-    await seekTo(
-      video,
-      Math.min(composed.sourceDurationMs, sourceTimeForPlayhead(composed, current.playheadMs)),
+    const sourceMs = Math.min(
+      composed.sourceDurationMs,
+      sourceTimeForPlayhead(composed, current.playheadMs),
     );
+    await seekTo(video, sourceMs);
 
     const source: FrameSource = {
       image: video,
@@ -173,12 +196,26 @@ export function EditorPage({ sourcePath, onBack, onPickRecording }: Props) {
     };
     drawFrame(ctx, canvas.width, canvas.height, source, {
       background: composed.background,
+      crop: composed.crop,
       zoom: zoomAt(composed, current.playheadMs),
       annotations: annotationsAt(composed, current.playheadMs),
       timeMs: current.playheadMs,
+      // The cursor track is stamped against the recording, not the timeline, so after a
+      // trim or a speed change these are different numbers — and using the timeline
+      // position would slide every click by however much was trimmed.
+      sourceTimeMs: sourceMs,
       moves: track?.moves ?? [],
       clicks: track?.clicks ?? [],
-      captureOrigin: { x: 0, y: 0, width: composed.sourceWidth, height: composed.sourceHeight },
+      // The rectangle the recording covered, so absolute cursor samples land in the
+      // right place. Recordings made before that was stored fall back to the whole
+      // frame, which is right for a full-screen capture and the best available guess
+      // otherwise.
+      captureOrigin: track?.rect ?? {
+        x: 0,
+        y: 0,
+        width: composed.sourceWidth,
+        height: composed.sourceHeight,
+      },
       // The editor always draws its own cursor when a track exists. The recorded
       // frames carry the OS cursor only if the user asked for it at record time, and
       // drawing on top when they did would show two cursors.
@@ -312,8 +349,6 @@ export function EditorPage({ sourcePath, onBack, onPickRecording }: Props) {
               project={project}
               playheadMs={state?.playheadMs ?? 0}
               edit={edit}
-              frameWidth={PREVIEW_W}
-              frameHeight={PREVIEW_H}
             />
           </div>
 
@@ -390,6 +425,29 @@ export function EditorPage({ sourcePath, onBack, onPickRecording }: Props) {
                 edit={edit}
               />
             )}
+            {tab === "frame" && project && (
+              <>
+                <CropControl project={project} edit={edit} />
+                <div className="mt-3">
+                  <ZoomControl
+                    project={project}
+                    playheadMs={state?.playheadMs ?? 0}
+                    edit={edit}
+                    suggestions={suggestions}
+                    onApply={(s) =>
+                      edit(ops.addZoom({ startMs: s.startMs, endMs: s.endMs }, s.depth, s.focus))
+                    }
+                    onApplyAll={() => {
+                      // One edit for the whole batch, so a single undo takes back all of
+                      // it — undoing a dozen suggestions one at a time would be tedious.
+                      for (const s of suggestions ?? []) {
+                        edit(ops.addZoom({ startMs: s.startMs, endMs: s.endMs }, s.depth, s.focus));
+                      }
+                    }}
+                  />
+                </div>
+              </>
+            )}
             {tab === "style" && project && (
               <StylePanel project={project} playheadMs={state?.playheadMs ?? 0} edit={edit} />
             )}
@@ -411,21 +469,16 @@ export function EditorPage({ sourcePath, onBack, onPickRecording }: Props) {
 /**
  * Inspector tabs.
  *
- * Hand-rolled rather than antd's `Segmented` so the three buttons can carry a title
- * and wrap on a narrow panel without the segmented control clipping the labels.
+ * Hand-rolled rather than antd's `Segmented` so each button can be addressed by key and
+ * the row wraps on a narrow panel instead of clipping its labels.
  */
-function InspectorTabs({
-  tab,
-  onChange,
-}: {
-  tab: "clips" | "style" | "export";
-  onChange: (tab: "clips" | "style" | "export") => void;
-}) {
-  const items = [
+function InspectorTabs({ tab, onChange }: { tab: Tab; onChange: (tab: Tab) => void }) {
+  const items: Array<{ key: Tab; label: string }> = [
     { key: "clips", label: "剪辑" },
+    { key: "frame", label: "画面" },
     { key: "style", label: "样式" },
     { key: "export", label: "导出" },
-  ] as const;
+  ];
   return (
     <div className="flex gap-1 rounded-lg bg-ctl p-1">
       {items.map((item) => (
@@ -433,7 +486,7 @@ function InspectorTabs({
           key={item.key}
           size="small"
           type={tab === item.key ? "primary" : "text"}
-          className="flex-1"
+          className="flex-1 !px-1"
           onClick={() => onChange(item.key)}
         >
           {item.label}

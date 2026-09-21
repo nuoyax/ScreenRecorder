@@ -23,6 +23,22 @@ import {
 } from "@/lib/timeline/clips";
 import { type Span, fitSpan, moveSpan, resizeSpan } from "@/lib/timeline/span";
 
+/**
+ * Which part of the source frame is shown at all, as fractions of it.
+ *
+ * Kept separate from `BackgroundStyle.padding`, which insets the *composed* frame for
+ * the backdrop: this one picks a rectangle out of the recording, and everything else —
+ * zoom focus, annotations, exports — works inside whatever it leaves.
+ */
+export interface CropRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export const FULL_CROP: CropRect = { x: 0, y: 0, width: 1, height: 1 };
+
 export interface Project {
   /** Bumped when the stored shape changes; `projects.ts` migrates on load. */
   version: number;
@@ -36,6 +52,7 @@ export interface Project {
   zooms: ZoomRegion[];
   annotations: AnnotationRegion[];
   background: BackgroundStyle;
+  crop: CropRect;
 }
 
 export const PROJECT_VERSION = 1;
@@ -58,6 +75,7 @@ export function emptyProject(init: {
     zooms: [],
     annotations: [],
     background: DEFAULT_BACKGROUND,
+    crop: { ...FULL_CROP },
   };
 }
 
@@ -258,6 +276,11 @@ export const ops = {
   setBackground: (patch: Partial<BackgroundStyle>) => (project: Project): Project => ({
     ...project,
     background: { ...project.background, ...patch },
+  }),
+
+  setCrop: (patch: Partial<CropRect>) => (project: Project): Project => ({
+    ...project,
+    crop: { ...project.crop, ...patch },
   }),
 };
 

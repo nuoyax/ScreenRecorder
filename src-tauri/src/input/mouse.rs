@@ -41,6 +41,23 @@ pub struct MouseTrack {
     pub clicks: Vec<ClickSample>,
     /// Poll interval the samples were taken at, so consumers know the resolution.
     pub interval_us: u64,
+    /// Rectangle of the screen that was recorded, in virtual-screen coordinates.
+    ///
+    /// Samples are absolute and the recording is not, so without this a consumer cannot
+    /// tell which part of the screen the frame covers — and would draw the cursor in the
+    /// wrong place on a region recording, or on a multi-monitor setup where the primary
+    /// display does not start at (0,0). Absent in tracks written before it was recorded;
+    /// a missing value means "assume the samples are already frame-relative".
+    pub rect: Option<SampleRect>,
+}
+
+/// Screen rectangle a recording covers, in virtual-screen coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SampleRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
 }
 
 const DEFAULT_INTERVAL_US: u64 = 8_000;
@@ -67,10 +84,17 @@ pub struct MouseSampler {
 
 impl MouseSampler {
     /// Start sampling against the recording's shared `origin` clock.
-    pub fn start(origin: Instant) -> MouseSampler {
+    ///
+    /// `rect` records *which* screen rectangle these samples are relative to. The
+    /// samples themselves stay absolute (that is what `GetCursorPos` gives), so the
+    /// consumer needs the rectangle to map them onto a frame — the alternative,
+    /// subtracting the origin here, would silently bake one recording's framing into a
+    /// sidecar that is meant to be read alongside any of them.
+    pub fn start(origin: Instant, rect: SampleRect) -> MouseSampler {
         let stop = Arc::new(AtomicBool::new(false));
         let track = Arc::new(Mutex::new(MouseTrack {
             interval_us: DEFAULT_INTERVAL_US,
+            rect: Some(rect),
             ..Default::default()
         }));
         let stop2 = stop.clone();
@@ -170,6 +194,12 @@ mod tests {
                 button: "left".into(),
             }],
             interval_us: 8_000,
+            rect: Some(SampleRect {
+                x: 1920,
+                y: -120,
+                width: 2560,
+                height: 1440,
+            }),
         };
         let path = std::env::temp_dir().join("mouse_roundtrip.mouse.json");
         std::fs::write(&path, serde_json::to_vec(&track).unwrap()).unwrap();
@@ -178,6 +208,7 @@ mod tests {
         assert_eq!(back.clicks.len(), 1);
         assert_eq!(back.clicks[0].button, "left");
         assert_eq!(back.clicks[0].y, -20, "negative coords must survive");
+        assert_eq!(back.rect, track.rect, "the recorded rectangle must survive");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -191,6 +222,8 @@ mod tests {
         assert_eq!(back.moves.len(), 1);
         assert!(back.clicks.is_empty());
         assert_eq!(back.interval_us, 0);
+        // Written before the rectangle was recorded: absent, not a bogus zero rectangle.
+        assert!(back.rect.is_none());
         let _ = std::fs::remove_file(&path);
     }
 
@@ -199,9 +232,16 @@ mod tests {
     #[test]
     fn sampler_records_monotonic_samples_then_stops() {
         let origin = Instant::now();
-        let sampler = MouseSampler::start(origin);
+        let rect = SampleRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let sampler = MouseSampler::start(origin, rect);
         std::thread::sleep(std::time::Duration::from_millis(60));
         let track = sampler.stop();
+        assert_eq!(track.rect, Some(rect), "the sampler must record its rectangle");
         for w in track.moves.windows(2) {
             assert!(
                 w[1].t_us >= w[0].t_us,

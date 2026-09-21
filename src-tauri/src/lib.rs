@@ -139,6 +139,43 @@ fn start_recording(app: AppHandle, ctx: Ctx) -> Result<String, String> {
         None
     };
 
+    // The screen rectangle the recording covers, in virtual-screen coordinates. Cursor
+    // samples are absolute, so this is what lets the editor put the cursor in the right
+    // place on a region recording — or on any multi-monitor setup where the recorded
+    // display does not start at (0,0). Falls back to the first monitor rather than
+    // refusing to record: a wrong-but-present rectangle degrades the cursor overlay,
+    // while no rectangle at all would drop it.
+    let sample_rect = match s.source_kind.as_str() {
+        "window" => s.source_id.parse::<isize>().ok().and_then(capture::enum_sources::window_rect),
+        "region" => {
+            let [x, y, w, h] = s.region;
+            Some(input::mouse::SampleRect {
+                x,
+                y,
+                width: w.max(16) as u32,
+                height: h.max(16) as u32,
+            })
+        }
+        _ => {
+            let id = if s.source_id.is_empty() {
+                capture::enum_sources::enumerate_monitors()
+                    .first()
+                    .map(|m| m.id.clone())
+                    .unwrap_or_default()
+            } else {
+                s.source_id.clone()
+            };
+            capture::enum_sources::monitor_rect(&id)
+        }
+    }
+    .or_else(|| capture::enum_sources::enumerate_monitors().first().map(|m| input::mouse::SampleRect {
+        x: m.x,
+        y: m.y,
+        width: m.width as u32,
+        height: m.height as u32,
+    }))
+    .unwrap_or(input::mouse::SampleRect { x: 0, y: 0, width: 1920, height: 1080 });
+
     // frame size estimate for bitrate: use the capture source resolution, then apply
     // the same output scaling the recorder will use so the bitrate matches what is
     // actually encoded (a 720p output should not be budgeted at 1080p rates).
@@ -181,6 +218,7 @@ fn start_recording(app: AppHandle, ctx: Ctx) -> Result<String, String> {
         // Sample whenever the cursor is hidden (so the editor can draw its own) or the
         // user asked for click highlights. Sampling costs a poll thread, nothing more.
         sample_mouse: !s.show_cursor || s.click_highlight,
+        sample_rect,
         max_duration: if s.max_duration_secs > 0 {
             Some(std::time::Duration::from_secs(s.max_duration_secs as u64))
         } else {

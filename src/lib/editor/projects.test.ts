@@ -101,6 +101,25 @@ describe("sanitize repairs a damaged project", () => {
     expect(p.clips[0].sourceStartMs).toBe(4000);
   });
 
+  /**
+   * A zero or out-of-frame crop would divide by zero in the compositor's cursor mapping
+   * or ask `drawImage` for pixels that are not there, so it is repaired rather than
+   * trusted.
+   */
+  it("repairs a crop that would collapse or leave the frame", () => {
+    const collapsed = sanitize({ ...project(), crop: { x: 0, y: 0, width: 0, height: 0 } })!;
+    expect(collapsed.crop.width).toBeGreaterThan(0);
+    expect(collapsed.crop.height).toBeGreaterThan(0);
+
+    const escaped = sanitize({ ...project(), crop: { x: 9, y: 9, width: 0.5, height: 0.5 } })!;
+    expect(escaped.crop.x).toBeLessThanOrEqual(1 - escaped.crop.width + 1e-9);
+    expect(escaped.crop.y).toBeLessThanOrEqual(1 - escaped.crop.height + 1e-9);
+  });
+
+  it("defaults a missing crop to the whole frame", () => {
+    expect(sanitize(project())!.crop).toEqual({ x: 0, y: 0, width: 1, height: 1 });
+  });
+
   it("clamps zoom depth and focus into range", () => {
     const p = sanitize({
       ...project(),

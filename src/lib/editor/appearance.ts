@@ -8,6 +8,7 @@
 
 import type { AnnotationRegion, BackgroundStyle, ZoomRegion } from "@/lib/timeline/types";
 import { ZOOM_DEPTH_SCALES } from "@/lib/timeline/types";
+import type { CropRect } from "@/lib/editor/state";
 import type { ClickSample, MoveSample } from "@/lib/api";
 
 export interface FrameSource {
@@ -20,10 +21,20 @@ export interface FrameSource {
 
 export interface AppearanceOptions {
   background: BackgroundStyle;
+  /** Spatial crop of the source frame, as fractions. `{0,0,1,1}` shows all of it. */
+  crop: CropRect;
   zoom: ZoomRegion | null;
   annotations: AnnotationRegion[];
-  /** Timeline position of this frame, for picking the cursor sample. */
+  /** Where the playhead is on the *timeline*; zoom and annotations are keyed to this. */
   timeMs: number;
+  /**
+   * Where this frame comes from in the *recording*.
+   *
+   * Separate from `timeMs` because a trim or a speed change makes the two different
+   * numbers, and the cursor track is stamped against the recording's own clock — using
+   * the timeline position would slide every click and cursor by the amount trimmed.
+   */
+  sourceTimeMs: number;
   moves: MoveSample[];
   clicks: ClickSample[];
   /** Recording rectangle in virtual-screen coordinates, to place the cursor. */
@@ -65,7 +76,7 @@ export function drawFrame(
     ctx.shadowColor = "rgba(0,0,0,0.45)";
     ctx.shadowBlur = width * 0.02;
   }
-  drawZoomedVideo(ctx, box, source, opts.zoom);
+  drawZoomedVideo(ctx, box, source, opts.crop, opts.zoom);
   ctx.restore();
 
   // Annotations and cursor are drawn over the video but inside the same frame, so
@@ -143,32 +154,41 @@ function roundedRect(
  *
  * Zoom is applied by drawing a *smaller source rectangle* into the same destination
  * box, which is a crop rather than a scale — that is what keeps the zoomed result at
- * full output resolution instead of magnifying compressed pixels.
+ * full output resolution instead of magnifying compressed pixels. The spatial crop
+ * composes the same way: it picks the base rectangle, and zoom picks a smaller one
+ * inside it, so the two never fight over the same pixels.
  */
 function drawZoomedVideo(
   ctx: CanvasRenderingContext2D,
   box: { x: number; y: number; w: number; h: number },
   source: FrameSource,
+  crop: CropRect,
   zoom: ZoomRegion | null,
 ): void {
   const { image, imageWidth, imageHeight } = source;
   if (imageWidth <= 0 || imageHeight <= 0) return;
 
+  // The crop, in source pixels, clamped so a bogus stored rect cannot read past the end.
+  const cropW = Math.max(1, imageWidth * clamp(crop.width, 0.01, 1));
+  const cropH = Math.max(1, imageHeight * clamp(crop.height, 0.01, 1));
+  const cropX = clamp(imageWidth * crop.x, 0, imageWidth - cropW);
+  const cropY = clamp(imageHeight * crop.y, 0, imageHeight - cropH);
+
   if (!zoom) {
-    ctx.drawImage(image, box.x, box.y, box.w, box.h);
+    ctx.drawImage(image, cropX, cropY, cropW, cropH, box.x, box.y, box.w, box.h);
     return;
   }
 
   const scale = ZOOM_DEPTH_SCALES[zoom.depth] ?? 1.8;
-  const sw = imageWidth / scale;
-  const sh = imageHeight / scale;
+  const sw = cropW / scale;
+  const sh = cropH / scale;
 
-  // The focus point is the centre of the crop; clamping keeps the crop inside the
-  // source when the focus sits near an edge.
-  const focusX = zoom.focus.cx * imageWidth;
-  const focusY = zoom.focus.cy * imageHeight;
-  const sx = clamp(focusX - sw / 2, 0, imageWidth - sw);
-  const sy = clamp(focusY - sh / 2, 0, imageHeight - sh);
+  // The focus point is the centre of the crop *inside the cropped rectangle*, so a zoom
+  // still lands on the same spot after the frame has been cropped.
+  const focusX = cropX + zoom.focus.cx * cropW;
+  const focusY = cropY + zoom.focus.cy * cropH;
+  const sx = clamp(focusX - sw / 2, cropX, cropX + cropW - sw);
+  const sy = clamp(focusY - sh / 2, cropY, cropY + cropH - sh);
 
   ctx.drawImage(image, sx, sy, sw, sh, box.x, box.y, box.w, box.h);
 }
@@ -267,23 +287,40 @@ function drawCursor(
   box: { x: number; y: number; w: number; h: number },
   opts: AppearanceOptions,
 ): void {
-  const { x, y, width, height } = opts.captureOrigin;
+  const { width, height } = opts.captureOrigin;
   if (width <= 0 || height <= 0) return;
 
   if (opts.clickHighlight) {
-    drawClickRipples(ctx, box, width, height, opts);
+    drawClickRipples(ctx, box, opts);
   }
 
-  const move = sampleAt(opts.moves, opts.timeMs);
-  if (!move) return;
+  const move = sampleAt(opts.moves, opts.sourceTimeMs);
+  const at = cursorAt(move, opts.captureOrigin, opts.crop);
+  if (!at) return;
 
-  // Sample coordinates are virtual-screen; the recorded frame covers only
-  // `captureOrigin`, so a cursor outside the recording has no valid position.
-  const nx = (move.x - x) / width;
-  const ny = (move.y - y) / height;
-  if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
+  drawCursorGlyph(ctx, box.x + at.nx * box.w, box.y + at.ny * box.h, Math.max(8, box.w * 0.016));
+}
 
-  drawCursorGlyph(ctx, box.x + nx * box.w, box.y + ny * box.h, Math.max(8, box.w * 0.016));
+/**
+ * Where a sample lands in the composed frame, or `null` when it is outside what is shown.
+ *
+ * The crop matters here: a cursor over the browser chrome that the user cropped away must
+ * not be drawn floating at the edge of the frame. Normalizing against the cropped
+ * rectangle instead of the whole recording puts it where it belongs when it *is* inside,
+ * and rejects it when it is not.
+ */
+function cursorAt(
+  sample: MoveSample | null,
+  capture: { x: number; y: number; width: number; height: number },
+  crop: CropRect,
+): { nx: number; ny: number } | null {
+  if (!sample) return null;
+  const nx = (sample.x - capture.x) / capture.width;
+  const ny = (sample.y - capture.y) / capture.height;
+  const inX = (nx - crop.x) / Math.max(0.01, crop.width);
+  const inY = (ny - crop.y) / Math.max(0.01, crop.height);
+  if (inX < 0 || inX > 1 || inY < 0 || inY > 1) return null;
+  return { nx: inX, ny: inY };
 }
 
 /**
@@ -296,17 +333,13 @@ function drawCursor(
 function drawClickRipples(
   ctx: CanvasRenderingContext2D,
   box: { x: number; y: number; w: number; h: number },
-  width: number,
-  height: number,
   opts: AppearanceOptions,
 ): void {
-  const { x, y } = opts.captureOrigin;
   for (const click of opts.clicks) {
-    const ageMs = opts.timeMs - click.t_us / 1000;
+    const ageMs = opts.sourceTimeMs - click.t_us / 1000;
     if (ageMs < 0 || ageMs > CLICK_RIPPLE_MS) continue;
-    const nx = (click.x - x) / width;
-    const ny = (click.y - y) / height;
-    if (nx < 0 || nx > 1 || ny < 0 || ny > 1) continue;
+    const at = cursorAt(click, opts.captureOrigin, opts.crop);
+    if (!at) continue;
 
     const progress = ageMs / CLICK_RIPPLE_MS;
     const radius = box.w * 0.012 * (0.4 + progress * 1.6);
@@ -315,7 +348,7 @@ function drawClickRipples(
     ctx.strokeStyle = "#ff3b30";
     ctx.lineWidth = Math.max(1.5, box.w * 0.003);
     ctx.beginPath();
-    ctx.arc(box.x + nx * box.w, box.y + ny * box.h, radius, 0, Math.PI * 2);
+    ctx.arc(box.x + at.nx * box.w, box.y + at.ny * box.h, radius, 0, Math.PI * 2);
     ctx.stroke();
     ctx.restore();
   }

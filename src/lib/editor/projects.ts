@@ -16,7 +16,7 @@ import {
   DEFAULT_ANNOTATION_STYLE,
   DEFAULT_BACKGROUND,
 } from "@/lib/timeline/types";
-import { PROJECT_VERSION, type Project } from "./state";
+import { FULL_CROP, PROJECT_VERSION, type CropRect, type Project } from "./state";
 
 const KNOWN_VERSIONS = new Set([1]);
 
@@ -153,6 +153,25 @@ function sanitizeBackground(raw: unknown): BackgroundStyle {
 }
 
 /**
+ * Spatial crop of the source frame.
+ *
+ * Clamped so the kept rectangle can never collapse to nothing or leave the frame: a
+ * zero-width crop would divide by zero in the compositor's cursor mapping, and a crop
+ * hanging off the edge would ask `drawImage` for pixels that are not there.
+ */
+function sanitizeCrop(raw: unknown): CropRect {
+  if (!isObject(raw)) return { ...FULL_CROP };
+  const width = clamped(raw.width, 0.05, 1, 1);
+  const height = clamped(raw.height, 0.05, 1, 1);
+  return {
+    width,
+    height,
+    x: clamped(raw.x, 0, 1 - width, 0),
+    y: clamped(raw.y, 0, 1 - height, 0),
+  };
+}
+
+/**
  * Coerce parsed JSON into a usable project, or `null` when it cannot be one.
  *
  * Returns `null` rather than throwing: the caller shows "this file is not a project"
@@ -180,6 +199,7 @@ export function sanitize(raw: unknown): Project | null {
     zooms: [],
     annotations: [],
     background: sanitizeBackground(raw.background),
+    crop: sanitizeCrop(raw.crop),
   };
 
   // Clamped against the *timeline* duration, which is what the regions are drawn on.

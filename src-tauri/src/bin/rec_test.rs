@@ -88,6 +88,14 @@ fn main() {
         // REC_NO_CURSOR=1 records without the OS cursor, mirroring the UI toggle.
         show_cursor: std::env::var("REC_NO_CURSOR").is_err(),
         sample_mouse: true,
+        // The rectangle the recording covers, so the sidecar's absolute samples can be
+        // placed on frames. A full-monitor recording, which is what this test takes.
+        sample_rect: screen_recorder::input::mouse::SampleRect {
+            x: first.x,
+            y: first.y,
+            width: first.width as u32,
+            height: first.height as u32,
+        },
         max_duration: Some(Duration::from_secs(6)),
         max_file_mb: None,
     })

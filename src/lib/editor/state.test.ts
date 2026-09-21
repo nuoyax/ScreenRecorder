@@ -214,6 +214,28 @@ describe("annotation ops", () => {
   });
 });
 
+describe("crop", () => {
+  it("starts as the whole frame", () => {
+    expect(project().crop).toEqual({ x: 0, y: 0, width: 1, height: 1 });
+  });
+
+  it("patches only the fields given", () => {
+    expect(ops.setCrop({ x: 0.1 })(project()).crop).toEqual({
+      x: 0.1,
+      y: 0,
+      width: 1,
+      height: 1,
+    });
+  });
+
+  it("leaves the clips alone, so cropping is not a cut", () => {
+    const before = project();
+    const after = ops.setCrop({ x: 0.25, width: 0.5 })(before);
+    expect(after.clips).toEqual(before.clips);
+    expect(durationMs(after)).toBe(durationMs(before));
+  });
+});
+
 describe("playhead helpers", () => {
   it("reads the source time through the clip mapping", () => {
     const p = project();

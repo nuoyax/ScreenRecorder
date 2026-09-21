@@ -194,6 +194,41 @@ pub fn capture_item_for_window(hwnd: isize) -> windows::core::Result<GraphicsCap
     }
 }
 
+/// Screen rectangle covered by a window, in virtual-screen coordinates.
+///
+/// `GetWindowRect` and not `GetClientRect`: the capture item for a window covers the
+/// whole window including its frame, and a cursor sample is absolute screen coordinates,
+/// so the two have to describe the same rectangle. Returns `None` for a handle that is
+/// no longer a window rather than a bogus rectangle at (0,0).
+pub fn window_rect(hwnd: isize) -> Option<crate::input::mouse::SampleRect> {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    let mut rect = RECT::default();
+    unsafe { GetWindowRect(HWND(hwnd as *mut _), &mut rect).ok()? };
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    Some(crate::input::mouse::SampleRect {
+        x: rect.left,
+        y: rect.top,
+        width: width as u32,
+        height: height as u32,
+    })
+}
+
+/// Screen rectangle covered by a monitor, in virtual-screen coordinates.
+pub fn monitor_rect(device_name: &str) -> Option<crate::input::mouse::SampleRect> {
+    let mon = enumerate_monitors().into_iter().find(|m| m.id == device_name)?;
+    Some(crate::input::mouse::SampleRect {
+        x: mon.x,
+        y: mon.y,
+        width: mon.width as u32,
+        height: mon.height as u32,
+    })
+}
+
 // keep Interface trait in scope for `.cast` use elsewhere
 #[allow(unused_imports)]
 use Interface as _;

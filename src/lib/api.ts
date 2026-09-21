@@ -84,6 +84,20 @@ export type ClickSample = MoveSample & {
 };
 
 /**
+ * Screen rectangle a recording covers, in virtual-screen coordinates.
+ *
+ * Cursor samples are absolute; without this the editor cannot tell which part of the
+ * screen the frame shows, and would draw the cursor in the wrong place on a region
+ * recording or on a multi-monitor setup.
+ */
+export type SampleRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+/**
  * Cursor + click track recorded next to a video. `interval_us` is the sampling
  * interval, so consumers know the resolution of the samples.
  */
@@ -91,6 +105,8 @@ export type MouseTrack = {
   moves: MoveSample[];
   clicks: ClickSample[];
   interval_us: number;
+  /** Absent in tracks written before it was recorded. */
+  rect?: SampleRect | null;
 };
 
 /**

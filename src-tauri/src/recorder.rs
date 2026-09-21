@@ -46,6 +46,9 @@ pub struct RecorderOptions {
     pub show_cursor: bool,
     /// observe cursor position + clicks while recording; off means no sidecar file
     pub sample_mouse: bool,
+    /// Rectangle of the screen being recorded, so the sidecar's absolute samples can be
+    /// mapped onto frames. Only read when `sample_mouse` is set.
+    pub sample_rect: crate::input::mouse::SampleRect,
     pub max_duration: Option<Duration>,
     pub max_file_mb: Option<u64>,
 }
@@ -109,7 +112,7 @@ impl Recorder {
         // the frame it happened during. Sampling is also what lets the editor draw a
         // cursor overlay when the OS cursor is excluded from the frames themselves.
         let mouse = if opts.sample_mouse {
-            Some(MouseSampler::start(origin))
+            Some(MouseSampler::start(origin, opts.sample_rect))
         } else {
             None
         };

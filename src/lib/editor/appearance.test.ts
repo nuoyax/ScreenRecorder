@@ -56,9 +56,11 @@ const image = { width: 1920, height: 1080 } as unknown as CanvasImageSource;
 function baseOptions(over: Partial<AppearanceOptions> = {}): AppearanceOptions {
   return {
     background: { ...DEFAULT_BACKGROUND, color: "#000000", shadow: false },
+    crop: { x: 0, y: 0, width: 1, height: 1 },
     zoom: null,
     annotations: [],
     timeMs: 0,
+    sourceTimeMs: 0,
     moves: [],
     clicks: [],
     captureOrigin: { x: 0, y: 0, width: 1920, height: 1080 },
@@ -89,12 +91,12 @@ describe("drawFrame", () => {
     drawFrame(ctx, 1000, 1000, SOURCE, baseOptions({
       background: { ...DEFAULT_BACKGROUND, padding: 0.1, shadow: false },
     }));
-    // Unzoomed frames use the 5-argument drawImage, so the destination is args[1..4].
+    // Drawn with the source-rect form, so the destination is args[5..8].
     const [draw] = draws(calls);
-    expect(draw.args[1]).toBeCloseTo(100);
-    expect(draw.args[2]).toBeCloseTo(100);
-    expect(draw.args[3]).toBeCloseTo(800);
-    expect(draw.args[4]).toBeCloseTo(800);
+    expect(draw.args[5]).toBeCloseTo(100);
+    expect(draw.args[6]).toBeCloseTo(100);
+    expect(draw.args[7]).toBeCloseTo(800);
+    expect(draw.args[8]).toBeCloseTo(800);
   });
 
   /** Zoom is a crop of the source, not a scaled-up draw, so the scale stays real. */
@@ -132,14 +134,34 @@ describe("drawFrame", () => {
       background: { ...DEFAULT_BACKGROUND, padding: 0, shadow: false },
     }));
     const [draw] = draws(calls);
-    expect(draw.args.slice(1, 5)).toEqual([0, 0, 1920, 1080]);
+    expect(draw.args.slice(5, 9)).toEqual([0, 0, 1920, 1080]);
   });
 
-  /** An unzoomed draw passes no source rectangle, so it must not crop implicitly. */
-  it("uses the full-source drawImage form when unzoomed", () => {
+  /**
+   * An uncropped, unzoomed frame passes the source rectangle explicitly rather than
+   * using the 5-argument form. Not just a style choice: the two forms are equivalent
+   * only when the crop happens to cover the whole image, and spelling it out keeps the
+   * cursor mapping below honest about which sub-rectangle the frame is showing.
+   */
+  it("names the source rectangle even when it is the whole image", () => {
     const { ctx, calls } = fakeContext();
     drawFrame(ctx, 1920, 1080, SOURCE, baseOptions());
-    expect(draws(calls)[0].args).toHaveLength(5);
+    expect(draws(calls)[0].args.slice(1, 5)).toEqual([0, 0, 1920, 1080]);
+  });
+
+  /** A crop reads a sub-rectangle out of the source and stretches it to the box. */
+  it("reads the cropped sub-rectangle out of the source", () => {
+    const { ctx, calls } = fakeContext();
+    drawFrame(ctx, 1920, 1080, SOURCE, baseOptions({
+      background: { ...DEFAULT_BACKGROUND, padding: 0, shadow: false },
+      crop: { x: 0.25, y: 0.1, width: 0.5, height: 0.5 },
+    }));
+    const [draw] = draws(calls);
+    expect(draw.args[1]).toBeCloseTo(480);
+    expect(draw.args[2]).toBeCloseTo(108);
+    expect(draw.args[3]).toBeCloseTo(960);
+    expect(draw.args[4]).toBeCloseTo(540);
+    expect(draw.args.slice(5, 9)).toEqual([0, 0, 1920, 1080]);
   });
 
   it("skips the video entirely when the source has no size yet", () => {
@@ -207,6 +229,7 @@ describe("drawFrame", () => {
     drawFrame(during.ctx, 1920, 1080, SOURCE, baseOptions({
       clicks,
       timeMs: 200,
+      sourceTimeMs: 200,
       showCursor: true,
       clickHighlight: true,
     }));
@@ -214,11 +237,55 @@ describe("drawFrame", () => {
     drawFrame(after.ctx, 1920, 1080, SOURCE, baseOptions({
       clicks,
       timeMs: 5000,
+      sourceTimeMs: 5000,
       showCursor: true,
       clickHighlight: true,
     }));
     expect(during.calls.some((c) => c.op === "arc")).toBe(true);
     expect(after.calls.some((c) => c.op === "arc")).toBe(false);
+  });
+
+  /**
+   * The cursor track is stamped against the recording, so after a trim the timeline
+   * position and the source position are different numbers. Reading the track at the
+   * timeline position would slide every click by however much was trimmed off the front
+   * — here, a click two seconds in is simply outside a frame taken at source time zero.
+   */
+  it("reads the cursor track at the source time, not the timeline time", () => {
+    // 2 s into the recording, in the track's own microsecond clock.
+    const clicks = [{ t_us: 2_000_000, x: 960, y: 540, button: "left" }];
+    const timedToTimeline = fakeContext();
+    drawFrame(timedToTimeline.ctx, 1920, 1080, SOURCE, baseOptions({
+      clicks,
+      timeMs: 2000,
+      sourceTimeMs: 0,
+      showCursor: true,
+      clickHighlight: true,
+    }));
+    const timedToSource = fakeContext();
+    drawFrame(timedToSource.ctx, 1920, 1080, SOURCE, baseOptions({
+      clicks,
+      timeMs: 0,
+      sourceTimeMs: 2000,
+      showCursor: true,
+      clickHighlight: true,
+    }));
+    expect(timedToTimeline.calls.some((c) => c.op === "arc")).toBe(false);
+    expect(timedToSource.calls.some((c) => c.op === "arc")).toBe(true);
+  });
+
+  /** A cursor that the crop cut away must not be drawn floating at the frame edge. */
+  it("skips a cursor sample outside the crop", () => {
+    const { ctx, calls } = fakeContext();
+    drawFrame(ctx, 1920, 1080, SOURCE, baseOptions({
+      // Top-left of the source, which a right-half crop does not show.
+      moves: [{ t_us: 0, x: 100, y: 100 }],
+      timeMs: 0,
+      sourceTimeMs: 0,
+      showCursor: true,
+      crop: { x: 0.5, y: 0, width: 0.5, height: 1 },
+    }));
+    expect(calls.filter((c) => c.op === "fill").length).toBe(0);
   });
 
   it("does not draw ripples when click highlighting is off", () => {
