@@ -13,6 +13,7 @@ import {
 } from "antd";
 import { Transport } from "@/components/Transport";
 import { CountdownOverlay } from "@/components/CountdownOverlay";
+import { EditorPage } from "@/pages/EditorPage";
 import { api, type HistoryEntry, type Settings, type SourceLists, type MicrophoneInfo } from "@/lib/api";
 import { fileName, formatDuration } from "@/lib/format";
 import { useCountdown } from "@/hooks/useCountdown";
@@ -54,6 +55,9 @@ export function MainPage() {
   const [mics, setMics] = useState<MicrophoneInfo[]>([]);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [hint, setHint] = useState("");
+  /** Which page is showing. A view switch rather than a router: there are two pages. */
+  const [view, setView] = useState<"record" | "editor">("record");
+  const [editTarget, setEditTarget] = useState<string | null>(null);
   const skipSave = useRef(true);
   const prevState = useRef(state);
 
@@ -136,6 +140,20 @@ export function MainPage() {
       unlisten?.();
     };
   }, []);
+
+  // Placed after every hook so switching views cannot change the hook order.
+  if (view === "editor") {
+    return (
+      <EditorPage
+        sourcePath={editTarget}
+        onBack={() => setView("record")}
+        onPickRecording={() => {
+          setView("record");
+          setHint("在「最近」里点某条录制的「编辑」即可打开编辑器");
+        }}
+      />
+    );
+  }
 
   const sourceOptions =
     settings.source_kind === "window"
@@ -232,6 +250,20 @@ export function MainPage() {
                           <span className="shrink-0 text-xs text-muted">
                             {h.size_mb.toFixed(1)} MB  {h.modified}
                           </span>
+                          <Button
+                            type="link"
+                            size="small"
+                            className="!px-0"
+                            onClick={(e) => {
+                              // The row itself opens the file; editing is a different
+                              // intent, so it must not also launch the player.
+                              e.stopPropagation();
+                              setEditTarget(h.path);
+                              setView("editor");
+                            }}
+                          >
+                            编辑
+                          </Button>
                           <Button type="link" size="small" className="!px-0">
                             打开
                           </Button>

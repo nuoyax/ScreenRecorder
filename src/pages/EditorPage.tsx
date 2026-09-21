@@ -1,0 +1,487 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Button, Empty, Space, Typography } from "antd";
+import {
+  RedoOutlined,
+  ScissorOutlined,
+  UndoOutlined,
+  ZoomInOutlined,
+} from "@ant-design/icons";
+import { api, type MouseTrack } from "@/lib/api";
+import { fileName } from "@/lib/format";
+import {
+  type EditorState,
+  type Project,
+  annotationsAt,
+  applyEdit,
+  canRedo,
+  canUndo,
+  durationMs,
+  emptyProject,
+  initialState,
+  ops,
+  playbackRateAt,
+  redo,
+  sourceTimeForPlayhead,
+  undo,
+  zoomAt,
+} from "@/lib/editor/state";
+import { projectPathFor, sanitize, serialize } from "@/lib/editor/projects";
+import { drawFrame, type FrameSource } from "@/lib/editor/appearance";
+import { seekTo } from "@/lib/editor/playback";
+import { Timeline } from "@/components/editor/Timeline";
+import { ClipList } from "@/components/editor/ClipList";
+import { StylePanel } from "@/components/editor/StylePanel";
+import { AnnotationLayer } from "@/components/editor/AnnotationLayer";
+import { ExportPanel } from "@/components/editor/ExportPanel";
+import { DEFAULT_ZOOM_DEPTH } from "@/lib/timeline/types";
+import { formatTimecode } from "@/lib/timeline/time";
+
+const { Text, Title } = Typography;
+
+/** Preview composition size. Matches the export default so the layout is identical. */
+const PREVIEW_W = 1280;
+const PREVIEW_H = 720;
+
+type Props = {
+  /** Recording to open. `null` shows the empty state. */
+  sourcePath: string | null;
+  onBack: () => void;
+  onPickRecording: () => void;
+};
+
+/**
+ * Timeline editor for one recording.
+ *
+ * The whole editing session is one `EditorState` value in this component; the children
+ * are presentational and call `edit()` with an operation from `ops`. That keeps undo
+ * honest — there is exactly one place a project changes.
+ */
+export function EditorPage({ sourcePath, onBack, onPickRecording }: Props) {
+  const [state, setState] = useState<EditorState | null>(null);
+  const [error, setError] = useState("");
+  const [tab, setTab] = useState<"clips" | "style" | "export">("clips");
+  const [selectedClip, setSelectedClip] = useState<string | null>(null);
+  const [track, setTrack] = useState<MouseTrack | null>(null);
+  const [playing, setPlaying] = useState(false);
+
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const rafRef = useRef<number | null>(null);
+  /** Playhead at the instant playback started; read by the loop without re-binding it. */
+  const playStartRef = useRef(0);
+  /**
+   * Latest state, for the playback loop.
+   *
+   * The loop must not list `state` as a dependency: it advances the playhead itself, so
+   * depending on the playhead would tear down and restart the loop on every frame.
+   */
+  const stateRef = useRef<EditorState | null>(null);
+  stateRef.current = state;
+
+  const edit = useCallback((fn: (project: Project) => Project) => {
+    setState((s) => (s ? applyEdit(s, fn) : s));
+  }, []);
+
+  // Load the recording: read its metadata from the <video> element, then open the
+  // project file next to it if one exists.
+  useEffect(() => {
+    let cancelled = false;
+    setState(null);
+    setTrack(null);
+    setSelectedClip(null);
+    setPlaying(false);
+    setError("");
+    if (!sourcePath) return;
+
+    (async () => {
+      try {
+        await api.allowAsset(sourcePath);
+        const video = videoRef.current;
+        if (!video) return;
+        video.src = convertSrc(sourcePath);
+
+        const meta = await waitForMetadata(video);
+        if (cancelled) return;
+
+        const projectFile = projectPathFor(sourcePath);
+        let project: Project | null = null;
+        if (await api.fileExists(projectFile)) {
+          try {
+            project = sanitize(JSON.parse(await api.readTextFile(projectFile)));
+          } catch {
+            // A damaged project file must not block the recording: fall through to a
+            // fresh project and say so, rather than refusing to open the editor.
+            project = null;
+            setError("工程文件无法读取，已按新工程打开");
+          }
+        }
+        if (cancelled) return;
+
+        setState(
+          initialState(
+            project ??
+              emptyProject({
+                sourcePath,
+                durationMs: meta.durationMs,
+                width: meta.width,
+                height: meta.height,
+                fps: 30,
+              }),
+          ),
+        );
+
+        const mouse = await api.loadMouseTrack(sourcePath);
+        if (!cancelled) {
+          setTrack(mouse);
+          if (!mouse) setError((e) => e || "该录制没有光标轨迹，预览不画光标");
+        }
+      } catch (e) {
+        if (!cancelled) setError(String(e));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sourcePath]);
+
+  const project = state?.project ?? null;
+  const total = project ? durationMs(project) : 0;
+
+  /** Draw one composed frame at the playhead into the preview canvas. */
+  const renderFrame = useCallback(async () => {
+    const current = stateRef.current;
+    const canvas = canvasRef.current;
+    const video = videoRef.current;
+    if (!current || !canvas || !video) return;
+    const composed = current.project;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    // Seeking is what makes this frame the right one; while playing, the video element
+    // is the clock instead and the browser hands us frames on its own.
+    await seekTo(
+      video,
+      Math.min(composed.sourceDurationMs, sourceTimeForPlayhead(composed, current.playheadMs)),
+    );
+
+    const source: FrameSource = {
+      image: video,
+      imageWidth: video.videoWidth,
+      imageHeight: video.videoHeight,
+    };
+    drawFrame(ctx, canvas.width, canvas.height, source, {
+      background: composed.background,
+      zoom: zoomAt(composed, current.playheadMs),
+      annotations: annotationsAt(composed, current.playheadMs),
+      timeMs: current.playheadMs,
+      moves: track?.moves ?? [],
+      clicks: track?.clicks ?? [],
+      captureOrigin: { x: 0, y: 0, width: composed.sourceWidth, height: composed.sourceHeight },
+      // The editor always draws its own cursor when a track exists. The recorded
+      // frames carry the OS cursor only if the user asked for it at record time, and
+      // drawing on top when they did would show two cursors.
+      showCursor: track !== null,
+      clickHighlight: track !== null,
+    });
+  }, [track]);
+
+  // Re-render on every change, except while playback owns the video element: seeking
+  // it there would fight the playback loop for the decoder.
+  useEffect(() => {
+    if (playing) return;
+    void renderFrame();
+  }, [renderFrame, playing, state]);
+
+  // Playback loop: the video plays at the clip's rate and the playhead follows the
+  // wall clock. Depending only on `playing`/`total` keeps the loop from restarting as
+  // it advances the playhead.
+  useEffect(() => {
+    if (!playing) return;
+    const video = videoRef.current;
+    const current = stateRef.current;
+    if (!video || !current) return;
+
+    playStartRef.current = current.playheadMs;
+    video.currentTime = sourceTimeForPlayhead(current.project, current.playheadMs) / 1000;
+    video.play().catch(() => undefined);
+
+    const startedAt = performance.now();
+    const startMs = playStartRef.current;
+
+    const tick = () => {
+      const next = startMs + (performance.now() - startedAt);
+      if (next >= total) {
+        setState((s) => (s ? { ...s, playheadMs: total } : s));
+        setPlaying(false);
+        return;
+      }
+      setState((s) => (s ? { ...s, playheadMs: next } : s));
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+      video.pause();
+    };
+  }, [playing, total]);
+
+  // Keep the decoder's rate in step with the clip under the playhead, so a 2x clip is
+  // actually watched at 2x rather than the playhead running away from the picture.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video && project && state) {
+      video.playbackRate = Math.max(0.0625, Math.min(16, playbackRateAt(project, state.playheadMs)));
+    }
+  }, [project, state]);
+
+  const saveProject = useCallback(async () => {
+    const current = stateRef.current;
+    if (!current) return;
+    try {
+      const path = projectPathFor(current.project.sourcePath);
+      await api.writeTextFile(path, serialize(current.project));
+      setError((e) => (e.startsWith("工程文件无法读取") ? e : ""));
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
+  // Save on a debounce: every drag produces many states and a write per state would
+  // hammer the disk. Also saves on unmount so the last edit is never lost.
+  useEffect(() => {
+    if (!state) return;
+    const timer = window.setTimeout(() => void saveProject(), 800);
+    return () => window.clearTimeout(timer);
+  }, [state, saveProject]);
+
+  useEffect(() => () => void saveProject(), [saveProject]);
+
+  if (!sourcePath) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 p-6">
+        <Empty description="还没有选择录制文件" />
+        <Space>
+          <Button type="primary" onClick={onPickRecording}>
+            从录制列表选择
+          </Button>
+          <Button onClick={onBack}>返回</Button>
+        </Space>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-screen flex-col bg-canvas text-ink">
+      <header className="flex items-center gap-2 border-b border-ctl px-3 py-2">
+        <Button size="small" onClick={onBack}>
+          返回
+        </Button>
+        <Title level={5} className="!mb-0 !text-sm">
+          编辑器
+        </Title>
+        <Text type="secondary" className="truncate text-xs">
+          {fileName(sourcePath)}
+        </Text>
+        <div className="flex-1" />
+        <Text type="secondary" className="text-xs tabular-nums">
+          {formatTimecode(state?.playheadMs ?? 0)} / {formatTimecode(total)}
+        </Text>
+      </header>
+
+      {error && (
+        <div className="border-b border-ctl bg-panel px-3 py-1 text-xs text-pause">{error}</div>
+      )}
+
+      <div className="flex min-h-0 flex-1">
+        {/* Left: preview + toolbar */}
+        <div className="flex min-w-0 flex-1 flex-col p-3">
+          <div className="relative flex min-h-0 flex-1 items-center justify-center rounded-xl border border-ctl bg-black">
+            <canvas
+              ref={canvasRef}
+              width={PREVIEW_W}
+              height={PREVIEW_H}
+              className="max-h-full max-w-full"
+            />
+            {/* The decoder feeds the canvas but is never shown. */}
+            <video ref={videoRef} className="hidden" crossOrigin="anonymous" muted playsInline />
+            <AnnotationLayer
+              project={project}
+              playheadMs={state?.playheadMs ?? 0}
+              edit={edit}
+              frameWidth={PREVIEW_W}
+              frameHeight={PREVIEW_H}
+            />
+          </div>
+
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Button
+              type="primary"
+              onClick={() => setPlaying((p) => !p)}
+              disabled={!state}
+              className={playing ? "!border-pause !bg-pause" : ""}
+            >
+              {playing ? "暂停" : "播放"}
+            </Button>
+            <Button
+              icon={<ScissorOutlined />}
+              disabled={!state}
+              onClick={() => edit(ops.splitAt(state?.playheadMs ?? 0))}
+            >
+              分割
+            </Button>
+            <Button
+              icon={<ZoomInOutlined />}
+              disabled={!state}
+              onClick={() => {
+                const at = state?.playheadMs ?? 0;
+                edit(
+                  ops.addZoom({ startMs: at, endMs: at + 2000 }, DEFAULT_ZOOM_DEPTH, {
+                    cx: 0.5,
+                    cy: 0.5,
+                  }),
+                );
+              }}
+            >
+              加缩放
+            </Button>
+            <div className="flex-1" />
+            <Button
+              icon={<UndoOutlined />}
+              disabled={!state || !canUndo(state)}
+              onClick={() => setState((s) => (s ? undo(s) : s))}
+              title="撤销"
+            >
+              撤销
+            </Button>
+            <Button
+              icon={<RedoOutlined />}
+              disabled={!state || !canRedo(state)}
+              onClick={() => setState((s) => (s ? redo(s) : s))}
+              title="重做"
+            >
+              重做
+            </Button>
+          </div>
+
+          <Timeline
+            project={project}
+            playheadMs={state?.playheadMs ?? 0}
+            durationMs={total}
+            onSeek={(ms) => setState((s) => (s ? { ...s, playheadMs: ms } : s))}
+            onSelectClip={setSelectedClip}
+            selectedClipId={selectedClip}
+            edit={edit}
+          />
+        </div>
+
+        {/* Right: inspector */}
+        <div className="w-[320px] shrink-0 overflow-y-auto border-l border-ctl p-3">
+          <InspectorTabs tab={tab} onChange={setTab} />
+          <div className="mt-3">
+            {tab === "clips" && project && (
+              <ClipList
+                project={project}
+                selectedClipId={selectedClip}
+                onSelect={setSelectedClip}
+                edit={edit}
+              />
+            )}
+            {tab === "style" && project && (
+              <StylePanel project={project} playheadMs={state?.playheadMs ?? 0} edit={edit} />
+            )}
+            {tab === "export" && project && (
+              <ExportPanel
+                project={project}
+                playheadMs={state?.playheadMs ?? 0}
+                videoRef={videoRef}
+                track={track}
+              />
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Inspector tabs.
+ *
+ * Hand-rolled rather than antd's `Segmented` so the three buttons can carry a title
+ * and wrap on a narrow panel without the segmented control clipping the labels.
+ */
+function InspectorTabs({
+  tab,
+  onChange,
+}: {
+  tab: "clips" | "style" | "export";
+  onChange: (tab: "clips" | "style" | "export") => void;
+}) {
+  const items = [
+    { key: "clips", label: "剪辑" },
+    { key: "style", label: "样式" },
+    { key: "export", label: "导出" },
+  ] as const;
+  return (
+    <div className="flex gap-1 rounded-lg bg-ctl p-1">
+      {items.map((item) => (
+        <Button
+          key={item.key}
+          size="small"
+          type={tab === item.key ? "primary" : "text"}
+          className="flex-1"
+          onClick={() => onChange(item.key)}
+        >
+          {item.label}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * `asset:` URL for a local recording.
+ *
+ * The Tauri global is looked up rather than imported so the module also loads where it
+ * is absent (the test runner), and a dev build without the global still works because
+ * `allow_asset` has already granted the path.
+ */
+function convertSrc(path: string): string {
+  const globalConvert = (
+    window as unknown as { __TAURI__?: { core?: { convertFileSrc?: (p: string) => string } } }
+  ).__TAURI__?.core?.convertFileSrc;
+  return typeof globalConvert === "function" ? globalConvert(path) : path;
+}
+
+/** Wait for the `<video>` to report its dimensions and duration. */
+function waitForMetadata(
+  video: HTMLVideoElement,
+): Promise<{ durationMs: number; width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const done = () => {
+      cleanup();
+      resolve({
+        durationMs: Number.isFinite(video.duration) ? video.duration * 1000 : 0,
+        width: video.videoWidth,
+        height: video.videoHeight,
+      });
+    };
+    const fail = () => {
+      cleanup();
+      reject(new Error("无法读取该视频文件"));
+    };
+    const cleanup = () => {
+      video.removeEventListener("loadedmetadata", done);
+      video.removeEventListener("error", fail);
+    };
+    if (video.readyState >= 1) done();
+    else {
+      video.addEventListener("loadedmetadata", done);
+      video.addEventListener("error", fail);
+    }
+  });
+}

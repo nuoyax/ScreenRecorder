@@ -125,6 +125,13 @@ export const api = {
   loadMouseTrack: (videoPath: string) =>
     invoke<MouseTrack | null>("load_mouse_track", { videoPath }),
   openFile: (path: string) => invoke<void>("open_file", { path }),
+  /** Read a text file the editor owns (a `.srec.json` project). */
+  readTextFile: (path: string) => invoke<string>("read_text_file", { path }),
+  writeTextFile: (path: string, contents: string) =>
+    invoke<void>("write_text_file", { path, contents }),
+  fileExists: (path: string) => invoke<boolean>("file_exists", { path }),
+  /** Grant the asset protocol access to one file, so the webview can load it. */
+  allowAsset: (path: string) => invoke<void>("allow_asset", { path }),
   /** Still frame of `monitorId`, for the picker backdrop. */
   captureMonitorPreview: (monitorId: string) =>
     invoke<MonitorPreview>("capture_monitor_preview", { monitorId }),

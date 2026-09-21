@@ -318,6 +318,45 @@ fn open_file(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Read a text file the editor owns (a `.srec.json` project next to a recording).
+///
+/// Scoped to text on purpose: this is how the editor loads a project, and a command
+/// that returned arbitrary bytes would be a bigger door than the feature needs.
+#[tauri::command]
+fn read_text_file(path: String) -> Result<String, String> {
+    std::fs::read_to_string(&path).map_err(|e| format!("读取 {path} 失败：{e}"))
+}
+
+/// Write a text file, creating parent directories if the recording folder is gone.
+#[tauri::command]
+fn write_text_file(path: String, contents: String) -> Result<(), String> {
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败：{e}"))?;
+    }
+    std::fs::write(&path, contents).map_err(|e| format!("写入 {path} 失败：{e}"))
+}
+
+/// Whether a file exists, so the editor can offer "open project" or "new project".
+#[tauri::command]
+fn file_exists(path: String) -> bool {
+    std::path::Path::new(&path).is_file()
+}
+
+/// Allow the editor to load one recording through the `asset:` protocol.
+///
+/// The asset protocol scope is empty in `tauri.conf.json` and widened here instead:
+/// recordings can live anywhere the user points the app at, and a static `**` glob
+/// in the config would expose the whole filesystem to the webview. This grants
+/// exactly the file the editor is about to open.
+#[tauri::command]
+fn allow_asset(app: AppHandle, path: String) -> Result<(), String> {
+    let canonical =
+        std::fs::canonicalize(&path).map_err(|e| format!("找不到文件 {path}：{e}"))?;
+    app.asset_protocol_scope()
+        .allow_file(&canonical)
+        .map_err(|e| format!("无法授权访问 {}：{e}", canonical.display()))
+}
+
 /// Cursor path + click track recorded alongside a video, if one exists.
 ///
 /// Returns `None` for recordings made with cursor sampling disabled — the editor
@@ -470,7 +509,9 @@ fn apply_region(
         settings::save(&app, &s);
     }
     let _ = app.emit("region-selected", region);
-    close_region_picker(app);
+    if let Some(w) = app.get_webview_window("region-select") {
+        let _ = w.close();
+    }
 }
 
 pub fn run() {
@@ -494,6 +535,10 @@ pub fn run() {
             list_recordings,
             list_microphones,
             open_file,
+            read_text_file,
+            write_text_file,
+            file_exists,
+            allow_asset,
             load_mouse_track,
             capture_monitor_preview,
             region_target,
