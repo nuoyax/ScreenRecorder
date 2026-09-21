@@ -125,6 +125,27 @@ export type MonitorPreview = {
   monitor_height: number;
 };
 
+/** Whether a usable `ffmpeg` was found, and what to tell the user if not. */
+export type FfmpegStatus = {
+  available: boolean;
+  path: string | null;
+  version: string | null;
+  /** Where it was found: `"PATH"`, `"常见安装位置"`, or the override variable. */
+  source: string;
+  /** Install instructions, present only when nothing was found. */
+  hint: string;
+};
+
+/** What an export produced. Reported back so the panel can show real numbers. */
+export type ExportResult = {
+  path: string;
+  bytes: number;
+  frames: number;
+  /** What the caller said it would send; a shortfall means the render loop gave up. */
+  expected_frames: number;
+  format: string;
+};
+
 export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) =>
@@ -169,6 +190,39 @@ export const api = {
   ): Promise<UnlistenFn> =>
     listen<[number, number, number, number]>("region-selected", (e) => handler(e.payload)),
   quitApp: () => invoke<void>("quit_app"),
+  /**
+   * Whether this build's IPC can carry a raw byte payload.
+   *
+   * The frame-based exports send an `ArrayBuffer`; the command reads the transport and
+   * reports what actually arrived, so the answer cannot drift from what the exporters
+   * will experience.
+   */
+  ipcRawSupported: () => invoke<boolean>("ipc_raw_supported", new Uint8Array([0, 0, 0, 0])),
+  /** Locate `ffmpeg` for the transcode card. Cached in Rust after the first call. */
+  ffmpegStatus: () => invoke<FfmpegStatus>("ffmpeg_status"),
+  /** Open a streaming GIF export. Fails before any rendering if the target is unusable. */
+  exportSetup: (args: {
+    path: string;
+    width: number;
+    height: number;
+    frames: number;
+    delayCs: number;
+  }) => invoke<void>("export_setup", args),
+  /**
+   * Hand one composed frame to the export in progress.
+   *
+   * The payload is a packed header + RGBA buffer (see `lib/export/framePack.ts`), sent
+   * as bytes rather than as a JSON array of numbers. Tauri routes a `Uint8Array`
+   * argument straight to the custom-protocol path, which is the only transport that
+   * carries a byte body — hence `ipcRawSupported` above.
+   */
+  exportPushFrame: (payload: Uint8Array) => invoke<number>("export_push_frame", payload),
+  /** Write the GIF and report what landed on disk. */
+  exportFinish: () => invoke<ExportResult>("export_finish"),
+  /** Abandon the export in progress. `false` when there was none. */
+  exportCancel: () => invoke<boolean>("export_cancel"),
+  /** Write one composed frame as a PNG sticker (framing travels in the payload header). */
+  exportImgSticker: (payload: Uint8Array) => invoke<ExportResult>("export_img_sticker", payload),
   onProgress: (handler: (p: Progress) => void): Promise<UnlistenFn> =>
     listen<Progress>("recording-progress", (e) => handler(e.payload)),
   onCodecFallback: (handler: (codec: string) => void): Promise<UnlistenFn> =>

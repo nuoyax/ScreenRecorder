@@ -456,7 +456,9 @@ export function EditorPage({ sourcePath, onBack, onPickRecording }: Props) {
                 project={project}
                 playheadMs={state?.playheadMs ?? 0}
                 videoRef={videoRef}
+                canvasRef={canvasRef}
                 track={track}
+                onBeforeExport={() => setPlaying(false)}
               />
             )}
           </div>

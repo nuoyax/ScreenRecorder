@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod capture;
 pub mod encoder;
+pub mod export;
 pub mod image;
 pub mod input;
 pub mod recorder;
@@ -17,6 +18,22 @@ pub struct AppState {
     /// Monitor the region picker window was opened over, so the picker page knows
     /// which still to show. Empty until a picker has been opened.
     pub region_target: Mutex<String>,
+    /// GIF being assembled by the current export, if any.
+    ///
+    /// Streaming, not batch: the editor emits frames as it renders them and holding a
+    /// two-minute 720p30 export in memory would be close to a gigabyte of RGBA before
+    /// the first byte reaches disk.
+    pub gif_export: Mutex<Option<GifExport>>,
+}
+
+/// A GIF export in progress: where it is going, what it is made of, and how far along.
+pub struct GifExport {
+    writer: export::gif::GifWriter,
+    path: PathBuf,
+    width: u32,
+    height: u32,
+    expected_frames: u32,
+    delay_cs: u16,
 }
 
 type Ctx<'a> = TauriState<'a, AppState>;
@@ -380,6 +397,187 @@ fn file_exists(path: String) -> bool {
     std::path::Path::new(&path).is_file()
 }
 
+/// Whether this build's IPC can carry a raw byte payload.
+///
+/// The exporters send frames as an `ArrayBuffer` rather than a JSON array of numbers,
+/// which Tauri only accepts on the custom-protocol path. Rather than discover that by
+/// failing halfway through an export, the UI calls this once at startup with a real
+/// bytes payload and greys out the frame-based exports if it does not arrive as bytes.
+///
+/// This command *is* the probe: it reports what the transport actually delivered, so
+/// there is no second mechanism that could disagree with the exporters.
+#[tauri::command]
+fn ipc_raw_supported(request: tauri::ipc::Request<'_>) -> bool {
+    matches!(request.body(), tauri::ipc::InvokeBody::Raw(_))
+}
+
+/// Locate `ffmpeg`, once, for the transcode card.
+#[tauri::command]
+fn ffmpeg_status() -> export::probe::FfmpegStatus {
+    export::probe::status()
+}
+
+/// Begin a streaming GIF export.
+///
+/// The header and loop extension are written now, so a bad frame count or an
+/// unwritable path fails before the editor spends a minute rendering.
+#[tauri::command]
+fn export_setup(
+    ctx: Ctx,
+    path: String,
+    width: u32,
+    height: u32,
+    frames: u32,
+    delay_cs: u16,
+) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err("导出尺寸无效".to_string());
+    }
+    if frames == 0 {
+        return Err("没有可导出的帧".to_string());
+    }
+    // GIF stores dimensions in 16 bits; a taller frame cannot be represented at all, and
+    // silently truncating it would produce a corrupt file.
+    if width > u16::MAX as u32 || height > u16::MAX as u32 {
+        return Err(format!("GIF 尺寸上限为 {}x{}", u16::MAX, u16::MAX));
+    }
+    // Reject an impossible delay here rather than writing a file that plays at the
+    // wrong speed: 0 means "as fast as possible" to most viewers, not "very fast".
+    if delay_cs == 0 {
+        return Err("帧间隔不能为 0".to_string());
+    }
+    let out = PathBuf::from(&path);
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败：{e}"))?;
+    }
+    let writer = export::gif::GifWriter::new(width as u16, height as u16);
+    *ctx.gif_export.lock().unwrap() = Some(GifExport {
+        writer,
+        path: out,
+        width,
+        height,
+        expected_frames: frames,
+        delay_cs,
+    });
+    Ok(())
+}
+
+/// Add one frame to the export in progress.
+///
+/// Takes `tauri::ipc::Request` rather than a typed argument: a raw payload has no named
+/// arguments, so the settings travel in the payload's own JSON header (see
+/// [`export::frame`]).
+#[tauri::command]
+fn export_push_frame(ctx: Ctx, request: tauri::ipc::Request<'_>) -> Result<u32, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("帧数据必须以二进制 payload 发送".to_string());
+    };
+    let frame = export::frame::unpack(bytes)?;
+    let pixels = export::frame::frame_pixels(frame.meta.width, frame.meta.height, &frame.rgba)?;
+    let mut guard = ctx.gif_export.lock().unwrap();
+    let export = guard
+        .as_mut()
+        .ok_or_else(|| "没有正在进行的导出（先调用 export_setup）".to_string())?;
+
+    // The stream's geometry is fixed by the header; a frame that disagrees would be
+    // silently mis-scaled, so it is refused instead.
+    if frame.meta.width != export.width || frame.meta.height != export.height {
+        return Err(format!(
+            "帧尺寸 {}x{} 与导出尺寸 {}x{} 不一致",
+            frame.meta.width, frame.meta.height, export.width, export.height
+        ));
+    }
+    let delay = if frame.meta.delay_cs == 0 {
+        export.delay_cs
+    } else {
+        frame.meta.delay_cs
+    };
+    export
+        .writer
+        .push_frame(pixels, delay, frame.meta.alpha_threshold);
+    Ok(export.writer.frames())
+}
+
+/// Write the GIF and report what landed on disk.
+#[tauri::command]
+fn export_finish(ctx: Ctx) -> Result<ExportResult, String> {
+    let export = ctx
+        .gif_export
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or_else(|| "没有正在进行的导出".to_string())?;
+    let count = export.writer.frames();
+    // An animation of fewer than two frames is not an animation. Writing it anyway would
+    // produce a file the user cannot tell apart from a failed export.
+    if count < 2 {
+        return Err(format!("只收到 {count} 帧，动画至少需要 2 帧"));
+    }
+    let bytes = export.writer.finish();
+    if let Some(parent) = export.path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败：{e}"))?;
+    }
+    std::fs::write(&export.path, &bytes).map_err(|e| format!("写入失败：{e}"))?;
+    Ok(ExportResult {
+        path: export.path.to_string_lossy().to_string(),
+        bytes: bytes.len() as u64,
+        frames: count,
+        expected_frames: export.expected_frames,
+        format: "gif".to_string(),
+    })
+}
+
+/// Abandon the export in progress without writing anything.
+#[tauri::command]
+fn export_cancel(ctx: Ctx) -> bool {
+    ctx.gif_export.lock().unwrap().take().is_some()
+}
+
+/// What one export produced, for the panel to report honestly.
+#[derive(serde::Serialize)]
+struct ExportResult {
+    path: String,
+    bytes: u64,
+    frames: u32,
+    /// What the caller said it would send. A shortfall is worth surfacing: it usually
+    /// means the render loop gave up partway, and a half-length GIF is not obvious.
+    expected_frames: u32,
+    format: String,
+}
+
+/// Write one composed frame as a PNG sticker.
+///
+/// The destination and the framing arrive inside the payload header rather than as
+/// command arguments: a raw bytes body has no JSON object for Tauri to read named keys
+/// from, so anything not in the payload would not arrive at all.
+#[tauri::command]
+fn export_img_sticker(request: tauri::ipc::Request<'_>) -> Result<ExportResult, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("帧数据必须以二进制 payload 发送".to_string());
+    };
+    let (header, rgba) = export::frame::unpack_json::<export::img::StickerFrame>(bytes)?;
+    if header.path.is_empty() {
+        return Err("帧数据未给出导出路径".to_string());
+    }
+    let pixels = export::frame::frame_pixels(header.width, header.height, &rgba)?;
+    let (rgba, w, h) =
+        export::img::build_sticker(pixels, header.width, header.height, header.options())
+            .ok_or_else(|| "贴纸尺寸与像素不匹配".to_string())?;
+    let png = image::png::encode_rgba(&rgba, w, h).ok_or_else(|| "PNG 编码失败".to_string())?;
+    let out = PathBuf::from(&header.path);
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败：{e}"))?;
+    }
+    std::fs::write(&out, &png).map_err(|e| format!("写入失败：{e}"))?;
+    Ok(ExportResult {
+        path: out.to_string_lossy().to_string(),
+        bytes: png.len() as u64,
+        frames: 1,
+        expected_frames: 1,
+        format: "png".to_string(),
+    })
+}
+
 /// Allow the editor to load one recording through the `asset:` protocol.
 ///
 /// The asset protocol scope is empty in `tauri.conf.json` and widened here instead:
@@ -560,6 +758,7 @@ pub fn run() {
             recorder: Mutex::new(None),
             settings: Mutex::new(settings::Settings::default()),
             region_target: Mutex::new(String::new()),
+            gif_export: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
@@ -577,6 +776,13 @@ pub fn run() {
             write_text_file,
             file_exists,
             allow_asset,
+            ipc_raw_supported,
+            ffmpeg_status,
+            export_setup,
+            export_push_frame,
+            export_finish,
+            export_cancel,
+            export_img_sticker,
             load_mouse_track,
             capture_monitor_preview,
             region_target,
