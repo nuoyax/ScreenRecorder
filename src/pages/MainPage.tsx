@@ -24,6 +24,7 @@ const defaultSettings = (): Settings => ({
   source_kind: "screen",
   source_id: "",
   region: [0, 0, 1280, 720],
+  region_thumbnail: "",
   fps: 30,
   scale_width: 0,
   codec: "h264",
@@ -104,6 +105,37 @@ export function MainPage() {
   useEffect(() => {
     api.listSources().then(setSources).catch(() => undefined);
   }, [settings.source_kind]);
+
+  // The picker writes the region into settings on the backend (it runs in its own
+  // window, so it cannot patch this component's state). Pull the result back so the
+  // panel shows the rectangle that was actually chosen.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    api
+      .onRegionSelected((region) => {
+        if (cancelled) return;
+        // Re-read rather than patching locally: the backend also flipped
+        // `source_kind` and stored the thumbnail, and inventing those here would
+        // duplicate the decision in two places.
+        api
+          .getSettings()
+          .then((fresh) => {
+            if (!cancelled) setSettings({ ...defaultSettings(), ...fresh });
+          })
+          .catch(() => undefined);
+        setHint(`已选择区域 ${region.join(", ")}`);
+      })
+      .then((off) => {
+        if (cancelled) off();
+        else unlisten = off;
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   const sourceOptions =
     settings.source_kind === "window"
@@ -236,22 +268,59 @@ export function MainPage() {
           onChange={(v) => patch({ source_id: v })}
         />
         {settings.source_kind === "region" && (
-          <div className="mt-2 grid grid-cols-2 gap-2">
-            {(["X", "Y", "W", "H"] as const).map((label, i) => (
-              <label key={label} className="flex items-center gap-2 text-muted">
-                {label}
-                <InputNumber
-                  className="w-full"
-                  value={settings.region[i]}
-                  onChange={(n) => {
-                    const region = [...settings.region] as Settings["region"];
-                    region[i] = Number(n ?? 0);
-                    patch({ region });
-                  }}
+          <>
+            <Button
+              className="mt-2 w-full"
+              onClick={async () => {
+                try {
+                  const target =
+                    settings.source_id || sources?.monitors[0]?.id || "";
+                  if (!target) {
+                    setHint("错误: 没有可用显示器");
+                    return;
+                  }
+                  await api.openRegionPicker(target);
+                } catch (e) {
+                  setHint(`错误: ${e}`);
+                }
+              }}
+            >
+              {settings.region_thumbnail ? "重新选择区域" : "选择区域"}
+            </Button>
+            {settings.region_thumbnail && (
+              <div className="mt-2 flex items-center gap-2">
+                <img
+                  src={settings.region_thumbnail}
+                  alt="选区预览"
+                  className="max-h-[64px] rounded border border-ctl object-contain"
                 />
-              </label>
-            ))}
-          </div>
+                <span className="text-xs tabular-nums text-muted">
+                  {settings.region.join(", ")}
+                </span>
+              </div>
+            )}
+            <details className="mt-2">
+              <summary className="cursor-pointer text-xs text-muted">
+                手动输入坐标
+              </summary>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                {(["X", "Y", "W", "H"] as const).map((label, i) => (
+                  <label key={label} className="flex items-center gap-2 text-muted">
+                    {label}
+                    <InputNumber
+                      className="w-full"
+                      value={settings.region[i]}
+                      onChange={(n) => {
+                        const region = [...settings.region] as Settings["region"];
+                        region[i] = Number(n ?? 0);
+                        patch({ region });
+                      }}
+                    />
+                  </label>
+                ))}
+              </div>
+            </details>
+          </>
         )}
         <p className="mt-2 text-xs text-muted">
           {sources?.wgc_supported

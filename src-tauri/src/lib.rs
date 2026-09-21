@@ -14,6 +14,9 @@ use tauri::{AppHandle, Emitter, Manager, State as TauriState};
 pub struct AppState {
     pub recorder: Mutex<Option<Arc<Recorder>>>,
     pub settings: Mutex<settings::Settings>,
+    /// Monitor the region picker window was opened over, so the picker page knows
+    /// which still to show. Empty until a picker has been opened.
+    pub region_target: Mutex<String>,
 }
 
 type Ctx<'a> = TauriState<'a, AppState>;
@@ -326,6 +329,150 @@ fn load_mouse_track(video_path: String) -> Option<input::mouse::MouseTrack> {
     )))
 }
 
+/// One monitor's still frame, ready to be shown behind the region picker.
+#[derive(serde::Serialize)]
+struct MonitorPreview {
+    /// `data:image/png;base64,...` of the whole monitor, at preview resolution.
+    data_url: String,
+    /// Monitor rectangle in virtual-screen coordinates. The picker needs nothing else
+    /// about the still: its own `<img>` reports the size it actually decoded at.
+    x: i32,
+    y: i32,
+    monitor_width: u32,
+    monitor_height: u32,
+}
+
+/// Capture one still of a monitor for the region picker.
+///
+/// Runs off the IPC thread: the first frame of a fresh WGC session can take a moment
+/// to arrive, and blocking the invoke handler for that long would freeze the UI.
+#[tauri::command]
+async fn capture_monitor_preview(monitor_id: String) -> Result<MonitorPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mon = capture::still::monitor_info(&monitor_id)?;
+        let still = capture::still::capture_monitor(&monitor_id)?;
+        Ok(MonitorPreview {
+            data_url: image::base64::encode_data_url("image/png", &still.preview_png),
+            x: mon.x,
+            y: mon.y,
+            monitor_width: mon.width.max(0) as u32,
+            monitor_height: mon.height.max(0) as u32,
+        })
+    })
+    .await
+    .map_err(|e| format!("抓帧任务失败：{e}"))?
+}
+
+/// Which monitor the picker window is currently covering (empty if none).
+#[tauri::command]
+fn region_target(ctx: Ctx) -> String {
+    ctx.region_target.lock().unwrap().clone()
+}
+
+/// Show the region picker over `monitor_id` (creating the window on first use).
+///
+/// The window is an ordinary opaque WebView2 window sized to the monitor, not a
+/// Win32 overlay: the frontend stays the only thing drawing UI, and the still frame
+/// comes from the command above rather than from any screenshot API the webview
+/// would otherwise need.
+#[tauri::command]
+fn open_region_picker(app: AppHandle, ctx: Ctx, monitor_id: String) -> Result<(), String> {
+    let mon = capture::still::monitor_info(&monitor_id)?;
+    // Recorded before the window is created: the page asks for it on mount, and a
+    // fresh window's first invoke can land before the builder call returns.
+    *ctx.region_target.lock().unwrap() = monitor_id.clone();
+
+    // Monitor rectangles are physical pixels; `position`/`inner_size` take *logical*
+    // units. On a scaled display those differ, and passing the raw numbers would
+    // leave the picker short of the screen edges by the scale factor.
+    let scale = app
+        .monitor_from_point(mon.x as f64, mon.y as f64)
+        .ok()
+        .flatten()
+        .map(|m| m.scale_factor())
+        .unwrap_or(1.0);
+    let (logical_x, logical_y) = (mon.x as f64 / scale, mon.y as f64 / scale);
+    let (logical_w, logical_h) = (
+        (mon.width.max(1) as f64 / scale).ceil(),
+        (mon.height.max(1) as f64 / scale).ceil(),
+    );
+
+    if let Some(w) = app.get_webview_window("region-select") {
+        // Reuse the existing window, but move it if the user picked another monitor.
+        let _ = w.set_position(tauri::LogicalPosition::new(logical_x, logical_y));
+        let _ = w.set_size(tauri::LogicalSize::new(logical_w, logical_h));
+        let _ = w.show();
+        let _ = w.set_focus();
+        // An already-mounted page has to be told the target changed.
+        let _ = app.emit("region-target", monitor_id);
+        return Ok(());
+    }
+
+    let win = tauri::WebviewWindowBuilder::new(
+        &app,
+        "region-select",
+        tauri::WebviewUrl::App("region-select.html".into()),
+    )
+    .title("选择录制区域")
+    .position(logical_x, logical_y)
+    .inner_size(logical_w, logical_h)
+    .decorations(false)
+    .shadow(false)
+    .always_on_top(true)
+    .resizable(false)
+    .skip_taskbar(true)
+    .background_color(tauri::window::Color(0x00, 0x00, 0x00, 0xff))
+    .build()
+    .map_err(|e| format!("无法打开区域选择窗口：{e}"))?;
+
+    // Keep it out of any capture even though picking normally happens while idle:
+    // a recording left running would otherwise film the picker covering the screen.
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
+        };
+        if let Ok(hwnd) = win.hwnd() {
+            let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+        }
+    }
+    let _ = win.set_focus();
+    Ok(())
+}
+
+#[tauri::command]
+fn close_region_picker(app: AppHandle) {
+    if let Some(w) = app.get_webview_window("region-select") {
+        let _ = w.close();
+    }
+}
+
+/// Accept the rectangle the user drew in the picker.
+///
+/// `region` is in absolute virtual-screen coordinates (the picker converts from its
+/// own preview pixels using the `scale` it was handed), and `thumbnail` is a small
+/// preview the settings panel can show next to the numbers.
+#[tauri::command]
+fn apply_region(
+    app: AppHandle,
+    ctx: Ctx,
+    region: [i32; 4],
+    thumbnail: String,
+    monitor_id: String,
+) {
+    {
+        let mut s = ctx.settings.lock().unwrap();
+        s.region = region;
+        s.region_thumbnail = thumbnail;
+        // Picking a rectangle is an explicit choice of what to record, so switch the
+        // source over too — leaving it on "screen" would silently ignore the region.
+        s.source_kind = "region".into();
+        s.source_id = monitor_id;
+        settings::save(&app, &s);
+    }
+    let _ = app.emit("region-selected", region);
+    close_region_picker(app);
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -333,6 +480,7 @@ pub fn run() {
         .manage(AppState {
             recorder: Mutex::new(None),
             settings: Mutex::new(settings::Settings::default()),
+            region_target: Mutex::new(String::new()),
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
@@ -347,6 +495,11 @@ pub fn run() {
             list_microphones,
             open_file,
             load_mouse_track,
+            capture_monitor_preview,
+            region_target,
+            open_region_picker,
+            close_region_picker,
+            apply_region,
             quit_app
         ])
         .setup(|app| {

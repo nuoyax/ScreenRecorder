@@ -6,7 +6,10 @@ export type RecState = "idle" | "recording" | "paused";
 export type Settings = {
   source_kind: "screen" | "window" | "region" | string;
   source_id: string;
+  /** region: x, y, w, h in virtual screen coordinates */
   region: [number, number, number, number];
+  /** data URL thumbnail of the last picked region; empty when none was picked */
+  region_thumbnail: string;
   fps: number;
   scale_width: number;
   codec: string;
@@ -90,6 +93,22 @@ export type MouseTrack = {
   interval_us: number;
 };
 
+/**
+ * A still of one monitor, shown behind the region picker.
+ *
+ * `x`/`y` are the monitor's origin in virtual-screen coordinates and
+ * `monitor_width`/`monitor_height` its real pixel size — together they turn a
+ * selection drawn on the preview into an absolute region, whatever size the preview
+ * is displayed at.
+ */
+export type MonitorPreview = {
+  data_url: string;
+  x: number;
+  y: number;
+  monitor_width: number;
+  monitor_height: number;
+};
+
 export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) =>
@@ -106,6 +125,26 @@ export const api = {
   loadMouseTrack: (videoPath: string) =>
     invoke<MouseTrack | null>("load_mouse_track", { videoPath }),
   openFile: (path: string) => invoke<void>("open_file", { path }),
+  /** Still frame of `monitorId`, for the picker backdrop. */
+  captureMonitorPreview: (monitorId: string) =>
+    invoke<MonitorPreview>("capture_monitor_preview", { monitorId }),
+  /** Monitor the picker window is currently covering; empty when none. */
+  regionTarget: () => invoke<string>("region_target"),
+  openRegionPicker: (monitorId: string) =>
+    invoke<void>("open_region_picker", { monitorId }),
+  closeRegionPicker: () => invoke<void>("close_region_picker"),
+  /** Commit a picked rectangle (absolute virtual-screen coords) + its thumbnail. */
+  applyRegion: (
+    region: [number, number, number, number],
+    thumbnail: string,
+    monitorId: string,
+  ) => invoke<void>("apply_region", { region, thumbnail, monitorId }),
+  onRegionTarget: (handler: (monitorId: string) => void): Promise<UnlistenFn> =>
+    listen<string>("region-target", (e) => handler(e.payload)),
+  onRegionSelected: (
+    handler: (region: [number, number, number, number]) => void,
+  ): Promise<UnlistenFn> =>
+    listen<[number, number, number, number]>("region-selected", (e) => handler(e.payload)),
   quitApp: () => invoke<void>("quit_app"),
   onProgress: (handler: (p: Progress) => void): Promise<UnlistenFn> =>
     listen<Progress>("recording-progress", (e) => handler(e.payload)),

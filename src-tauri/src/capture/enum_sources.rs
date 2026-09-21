@@ -34,6 +34,25 @@ pub fn is_supported() -> bool {
     .unwrap_or(false)
 }
 
+/// Make this process per-monitor DPI aware, once.
+///
+/// Without this, `GetMonitorInfoW` hands back *logical* coordinates: a 1920x1080
+/// display at 125% scaling reports 1536x864. WGC, meanwhile, always captures physical
+/// pixels, so a region picked in reported coordinates would land in the wrong place
+/// and the recorder would budget bitrate for a resolution it is not encoding.
+///
+/// Safe to call before the windowing layer sets its own awareness: an already-aware
+/// process rejects the call, and we ignore the error.
+fn ensure_dpi_awareness() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        use windows::Win32::UI::HiDpi::{
+            SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        };
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    });
+}
+
 unsafe extern "system" fn monitor_enum_proc(
     hmonitor: HMONITOR,
     _hdc: HDC,
@@ -61,6 +80,7 @@ unsafe extern "system" fn monitor_enum_proc(
 }
 
 pub fn enumerate_monitors() -> Vec<MonitorInfo> {
+    ensure_dpi_awareness();
     let mut list: Vec<MonitorInfo> = Vec::new();
     unsafe {
         let _ = EnumDisplayMonitors(

@@ -1,7 +1,7 @@
 {
   "identifier": "default",
   "description": "main + overlay windows",
-  "windows": ["main", "toolbar", "indicator"],
+  "windows": ["main", "toolbar", "indicator", "region-select"],
   "permissions": [
     "core:default",
     "core:window:default",

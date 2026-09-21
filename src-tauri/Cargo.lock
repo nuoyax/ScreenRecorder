@@ -2752,6 +2752,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "crossbeam-channel",
+ "flate2",
  "log",
  "parking_lot",
  "serde",

@@ -22,3 +22,4 @@ src-tauri/target-check/debug/
 
 # vendored patch + build debug tools
 src-tauri/target-check/
+target-check/

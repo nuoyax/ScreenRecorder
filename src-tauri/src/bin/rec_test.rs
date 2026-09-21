@@ -31,6 +31,40 @@ fn main() {
     }
 
     let first = mons.first().expect("no monitor found");
+
+    // The region picker's still frame is what the user aims with, so its geometry
+    // must be self-consistent: preview size, scale factor, and the monitor rectangle
+    // it claims to cover all have to agree, or every picked region would be offset.
+    let still = screen_recorder::capture::still::capture_monitor(&first.id)
+        .expect("FAIL: monitor still capture failed");
+    let (png_w, png_h) = screen_recorder::image::png::read_ihdr_size(&still.preview_png)
+        .expect("FAIL: still is not a readable PNG");
+    if (png_w, png_h) != (still.preview_width, still.preview_height) {
+        panic!(
+            "FAIL: still reports {}x{} but the PNG is {}x{}",
+            still.preview_width, still.preview_height, png_w, png_h
+        );
+    }
+    let round_w = still.preview_width as f64 * still.scale;
+    let round_h = still.preview_height as f64 * still.scale;
+    if (round_w - first.width as f64).abs() > 1.0 || (round_h - first.height as f64).abs() > 1.0 {
+        panic!(
+            "FAIL: preview {}x{} at scale {} does not map back to the monitor {}x{}",
+            still.preview_width, still.preview_height, still.scale, first.width, first.height
+        );
+    }
+    println!(
+        "STILL: {}x{} png ({} bytes), scale={:.3}, monitor={}x{} @ {},{}",
+        still.preview_width,
+        still.preview_height,
+        still.preview_png.len(),
+        still.scale,
+        first.width,
+        first.height,
+        first.x,
+        first.y
+    );
+
     let out = std::env::temp_dir().join("rec_test_output.mp4");
     let _ = std::fs::remove_file(&out);
 

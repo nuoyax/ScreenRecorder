@@ -4,4 +4,6 @@
 //! reads frames back to system memory for the encoder, so resampling in the same
 //! pass avoids a second readback and keeps the D3D11 pipeline untouched.
 
+pub mod base64;
+pub mod png;
 pub mod resize;

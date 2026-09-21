@@ -11,6 +11,9 @@ pub struct Settings {
     pub source_id: String,
     /// region: x, y, w, h in virtual screen coords
     pub region: [i32; 4],
+    /// Small `data:image/png;base64,...` of the last picked region, shown in settings
+    /// so the numbers are readable at a glance. Empty until a region is picked.
+    pub region_thumbnail: String,
     pub fps: u32,
     /// 0 = original size, else scaled width
     pub scale_width: u32,
@@ -47,6 +50,7 @@ impl Default for Settings {
             source_kind: "screen".into(),
             source_id: String::new(),
             region: [0, 0, 1280, 720],
+            region_thumbnail: String::new(),
             fps: 30,
             scale_width: 0,
             codec: "h264".into(),
