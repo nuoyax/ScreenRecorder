@@ -40,6 +40,7 @@ pub struct RecorderOptions {
     pub rate_mode: String,
     pub output_path: PathBuf,
     pub audio: Option<(bool, bool, f32, f32)>, // sys, mic, sys_gain, mic_gain
+    pub show_cursor: bool,
     pub max_duration: Option<Duration>,
     pub max_file_mb: Option<u64>,
 }
@@ -91,8 +92,12 @@ fn frame_at_size(f: RawFrame, w: u32, h: u32) -> RawFrame {
 
 impl Recorder {
     pub fn start(opts: RecorderOptions) -> Result<Arc<Recorder>, String> {
+        // Shared clock for the whole recording. Capture frames, audio, and auxiliary
+        // samples all timestamp against this, so they can be compared without
+        // guessing at start-time offsets between threads.
+        let origin = Instant::now();
         let (frame_tx, frame_rx) = crossbeam_channel::bounded::<RawFrame>(8);
-        let capture = wgc::start_capture(opts.source.clone(), opts.region, frame_tx)
+        let capture = wgc::start_capture(opts.source.clone(), opts.region, origin, opts.show_cursor, frame_tx)
             .map_err(|e| format!("capture init failed: {e}"))?;
 
         let audio_handle = match &opts.audio {
@@ -141,7 +146,7 @@ impl Recorder {
         // clock base: video timestamps come from capture (its own Instant base);
         // audio ts are audio-start-relative — we bridge by sending audio with an
         // offset computed from the first audio chunk vs recording start.
-        let video_base_us = now_us(); // approximates capture start (set just after first frame)
+        let video_base_us = origin.elapsed().as_micros() as u64;
 
         let _audio_ref = audio_handle.as_ref();
         let audio_offset_us = Arc::new(AtomicU64::new(0));

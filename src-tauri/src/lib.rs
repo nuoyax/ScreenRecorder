@@ -168,6 +168,7 @@ fn start_recording(app: AppHandle, ctx: Ctx) -> Result<String, String> {
         rate_mode: s.rate_mode.clone(),
         output_path: out_path.clone(),
         audio,
+        show_cursor: s.show_cursor,
         max_duration: if s.max_duration_secs > 0 {
             Some(std::time::Duration::from_secs(s.max_duration_secs as u64))
         } else {

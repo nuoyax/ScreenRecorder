@@ -76,10 +76,16 @@ pub fn create_d3d_device() -> windows::core::Result<(ID3D11Device, windows::Grap
 }
 
 /// Spawn a capture thread producing BGRA frames.
+///
 /// `region` (x,y,w,h) is in capture-item coordinates; None = full item.
+/// `origin` is the recording's shared clock: every frame timestamp and every
+/// auxiliary sample is measured from it, so they are directly comparable.
+/// `show_cursor` toggles the OS-drawn cursor inside captured frames.
 pub fn start_capture(
     source: SourceKind,
     region: Option<(i32, i32, u32, u32)>,
+    origin: std::time::Instant,
+    show_cursor: bool,
     frame_tx: crossbeam_channel::Sender<RawFrame>,
 ) -> windows::core::Result<CaptureHandle> {
     // WGC requires an initialized WinRT/COM apartment before any capture API use.
@@ -112,9 +118,19 @@ pub fn start_capture(
     let stop2 = stop.clone();
     let paused2 = paused.clone();
 
-    let start_time = std::time::Instant::now();
     let item_w = frame_size.Width;
     let item_h = frame_size.Height;
+
+    // Cursor visibility must be set before StartCapture; WGC captures the cursor
+    // itself when enabled, which is what makes "capture cursor" a real option here.
+    // Both setters are Win10 2004+ APIs and legitimately fail on older builds — the
+    // recording still works, so these failures are logged rather than fatal.
+    if let Err(e) = session.SetIsCursorCaptureEnabled(show_cursor) {
+        eprintln!("[cap] cursor capture unavailable ({e:#?}); using default behaviour");
+    }
+    if let Err(e) = session.SetIsBorderRequired(false) {
+        eprintln!("[cap] border suppression unavailable ({e:#?})");
+    }
 
     session.StartCapture()?;
 
@@ -135,7 +151,7 @@ pub fn start_capture(
             }
             match pool2.TryGetNextFrame() {
                 Ok(frame) => {
-                    let ts_us = start_time.elapsed().as_micros() as u64;
+                    let ts_us = origin.elapsed().as_micros() as u64;
                     if let Some(tex) = extract_texture(&frame) {
                         let w = tex.width;
                         let hgt = tex.height;

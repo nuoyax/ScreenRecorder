@@ -30,6 +30,8 @@ fn main() {
         rate_mode: "vbr".into(),
         output_path: out.clone(),
         audio: if std::env::var("REC_NO_AUDIO").is_ok() { None } else { Some((true, false, 1.0, 1.0)) },
+        // REC_NO_CURSOR=1 records without the OS cursor, mirroring the UI toggle.
+        show_cursor: std::env::var("REC_NO_CURSOR").is_err(),
         max_duration: Some(Duration::from_secs(6)),
         max_file_mb: None,
     })
