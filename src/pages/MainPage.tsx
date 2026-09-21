@@ -12,8 +12,10 @@ import {
   Typography,
 } from "antd";
 import { Transport } from "@/components/Transport";
+import { CountdownOverlay } from "@/components/CountdownOverlay";
 import { api, type HistoryEntry, type Settings, type SourceLists } from "@/lib/api";
 import { fileName, formatDuration } from "@/lib/format";
+import { useCountdown } from "@/hooks/useCountdown";
 import { useRecordingState } from "@/hooks/useRecordingState";
 
 const { Text, Title } = Typography;
@@ -44,6 +46,7 @@ const defaultSettings = (): Settings => ({
 
 export function MainPage() {
   const { state, duration } = useRecordingState();
+  const countdown = useCountdown();
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const [sources, setSources] = useState<SourceLists | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -112,6 +115,7 @@ export function MainPage() {
 
   return (
     <div className="min-h-screen bg-canvas px-4 py-4 text-ink">
+      <CountdownOverlay remaining={countdown} />
       <header className="mb-3.5 flex items-baseline justify-between">
         <Title level={4} className="!mb-0 !text-[18px] !text-ink">
           ScreenRecorder
@@ -308,6 +312,24 @@ export function MainPage() {
             ]}
           />
         </Field>
+        <Field label="输出宽度（0 保持原始）">
+          <Select
+            className="w-full max-w-[180px]"
+            value={settings.scale_width}
+            onChange={(v) => patch({ scale_width: v })}
+            options={[
+              { value: 0, label: "原始尺寸" },
+              { value: 3840, label: "3840 · 4K" },
+              { value: 2560, label: "2560 · 2K" },
+              { value: 1920, label: "1920 · 1080p" },
+              { value: 1280, label: "1280 · 720p" },
+              { value: 854, label: "854 · 480p" },
+            ]}
+          />
+        </Field>
+        <p className="mt-1 text-xs text-muted">
+          输出分辨率高于来源时保持原始尺寸，不会放大。
+        </p>
       </section>
 
       <section className="mb-2.5 rounded-xl bg-panel p-3.5">
@@ -352,6 +374,17 @@ export function MainPage() {
           <Switch
             checked={settings.show_cursor}
             onChange={(v) => patch({ show_cursor: v })}
+          />
+        </Field>
+        <Field label="开始前倒计时（秒）">
+          <Select
+            className="w-[88px]"
+            value={settings.countdown_secs}
+            onChange={(v) => patch({ countdown_secs: v })}
+            options={[0, 3, 5, 10].map((n) => ({
+              value: n,
+              label: n === 0 ? "关闭" : String(n),
+            }))}
           />
         </Field>
         <Field label="最长时长（秒，0 不限）">

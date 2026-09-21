@@ -78,6 +78,9 @@ export const api = {
     listen<Progress>("recording-progress", (e) => handler(e.payload)),
   onCodecFallback: (handler: (codec: string) => void): Promise<UnlistenFn> =>
     listen<string>("codec-fallback", (e) => handler(e.payload)),
+  /** Emits the remaining seconds (…3, 2, 1) then 0 once capture starts. */
+  onCountdown: (handler: (remaining: number) => void): Promise<UnlistenFn> =>
+    listen<number>("countdown", (e) => handler(e.payload)),
   onRecordingSaved: (handler: (path: string) => void): Promise<UnlistenFn> =>
     listen<string>("recording-saved", (e) => handler(e.payload)),
 };

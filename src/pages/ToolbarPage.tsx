@@ -6,7 +6,7 @@ import {
   UnorderedListOutlined,
 } from "@ant-design/icons";
 import { LogicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Transport } from "@/components/Transport";
 import { api, type HistoryEntry } from "@/lib/api";
@@ -45,7 +45,7 @@ export function ToolbarPage() {
     const w = getCurrentWindow();
     await w.setSize(new LogicalSize(BAR_W, expanded ? BAR_H_EXPANDED : BAR_H));
     try {
-      const monitor = await w.currentMonitor();
+      const monitor = await currentMonitor();
       const scale = await w.scaleFactor();
       if (!monitor) return;
       const wa = monitor.workArea;

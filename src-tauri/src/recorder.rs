@@ -32,6 +32,9 @@ pub struct RecorderOptions {
     pub fps: u32,
     pub width: u32,
     pub height: u32,
+    /// target output width; 0 keeps the captured size. Height follows the aspect
+    /// ratio and is rounded to an even number.
+    pub scale_width: u32,
     pub codec: String,
     pub bitrate_kbps: u32,
     pub rate_mode: String,
@@ -63,6 +66,29 @@ pub fn now_us() -> u64 {
         .unwrap_or(0)
 }
 
+/// Resample a captured frame to the encoder's target size.
+///
+/// Capture produces frames at the source resolution; when the user picked an output
+/// scale we downscale every frame here so the encoder never sees a size change
+/// mid-stream (MF rejects that). A frame that is already the right size is passed
+/// through untouched, which is the common case (`scale_width == 0`).
+fn frame_at_size(f: RawFrame, w: u32, h: u32) -> RawFrame {
+    if f.width == w && f.height == h {
+        return f;
+    }
+    match crate::image::resize::bgra_box(&f.data, f.width, f.height, w, h) {
+        Some(data) => RawFrame {
+            data,
+            width: w,
+            height: h,
+            ts_us: f.ts_us,
+        },
+        // Resize failed (short buffer, upscale request): keep the original frame so
+        // the recording continues rather than erroring out mid-stream.
+        None => f,
+    }
+}
+
 impl Recorder {
     pub fn start(opts: RecorderOptions) -> Result<Arc<Recorder>, String> {
         let (frame_tx, frame_rx) = crossbeam_channel::bounded::<RawFrame>(8);
@@ -88,7 +114,8 @@ impl Recorder {
             .recv_timeout(Duration::from_secs(5))
             .map_err(|_| "no frames from capture (timeout)")?;
 
-        let (w, h) = (first.width, first.height);
+        let (src_w, src_h) = (first.width, first.height);
+        let (w, h) = crate::settings::output_size(src_w, src_h, opts.scale_width);
         let cfg = EncoderConfig {
             width: w,
             height: h,
@@ -99,6 +126,9 @@ impl Recorder {
             audio: audio_params,
             input_bgra: true,
         };
+        // `first` is consumed by the worker thread; downscale before the move so the
+        // worker only ever sees frames already at the encoder's target size.
+        let first = frame_at_size(first, w, h);
 
         let state = Arc::new(Mutex::new(State::Recording));
         let paused = Arc::new(AtomicBool::new(false));
@@ -168,6 +198,7 @@ impl Recorder {
                 }
                 match frame_rx.recv_timeout(Duration::from_millis(300)) {
                     Ok(f) => {
+                        let f = frame_at_size(f, w, h);
                         // shift timestamps so pause intervals are removed
                         let mut ts = f.ts_us.saturating_sub(paused_total2.load(Ordering::SeqCst));
                         if ts <= last_ts {

@@ -20,6 +20,11 @@ fn main() {
         fps: 30,
         width: 0,
         height: 0,
+        // REC_SCALE_WIDTH=1280 exercises the output downscale path end to end.
+        scale_width: std::env::var("REC_SCALE_WIDTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
         codec: "h264".into(),
         bitrate_kbps: 8000,
         rate_mode: "vbr".into(),

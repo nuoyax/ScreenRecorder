@@ -57,6 +57,25 @@ html.bg-transparent body {
   animation: rec-blink 1.2s step-end infinite;
 }
 
+@keyframes countdown-tick {
+  0% {
+    opacity: 0;
+    transform: scale(1.35);
+  }
+  15% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.countdown-tick {
+  animation: countdown-tick 0.45s ease-out;
+}
+
 .recent-tabs .ant-tabs-nav::before {
   border: none;
 }

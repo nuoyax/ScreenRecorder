@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod capture;
 pub mod encoder;
+pub mod image;
 pub mod recorder;
 pub mod settings;
 
@@ -56,6 +57,17 @@ fn start_recording(app: AppHandle, ctx: Ctx) -> Result<String, String> {
     if ctx.recorder.lock().unwrap().is_some() {
         return Err("already recording".into());
     }
+
+    // Countdown: announce each tick before any capture is created, so the screen the
+    // user is about to record never contains a half-initialised capture session.
+    if s.countdown_secs > 0 {
+        for remaining in (1..=s.countdown_secs).rev() {
+            let _ = app.emit("countdown", remaining);
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+        let _ = app.emit("countdown", 0u32);
+    }
+
     // HEVC may be unavailable (no encoder MFT installed); probe synchronously
     // and fall back to H.264 so recording still works.
     if s.codec == "h265" {
@@ -123,12 +135,15 @@ fn start_recording(app: AppHandle, ctx: Ctx) -> Result<String, String> {
         None
     };
 
-    // frame size estimate for bitrate: use monitor res (refined on first frame)
+    // frame size estimate for bitrate: use the capture source resolution, then apply
+    // the same output scaling the recorder will use so the bitrate matches what is
+    // actually encoded (a 720p output should not be budgeted at 1080p rates).
     let (est_w, est_h) = capture::enum_sources::enumerate_monitors()
         .first()
         .map(|m| (m.width as u32, m.height as u32))
         .unwrap_or((1920, 1080));
-    let bitrate = settings::bitrate_for(est_w, est_h, s.fps, &s.quality, &s.codec, s.bitrate_kbps);
+    let (out_w, out_h) = settings::output_size(est_w, est_h, s.scale_width);
+    let bitrate = settings::bitrate_for(out_w, out_h, s.fps, &s.quality, &s.codec, s.bitrate_kbps);
 
     let audio = if s.record_system_audio || s.record_microphone {
         Some((
@@ -147,6 +162,7 @@ fn start_recording(app: AppHandle, ctx: Ctx) -> Result<String, String> {
         fps: s.fps,
         width: 0,
         height: 0,
+        scale_width: s.scale_width,
         codec: s.codec.clone(),
         bitrate_kbps: bitrate,
         rate_mode: s.rate_mode.clone(),
@@ -161,7 +177,18 @@ fn start_recording(app: AppHandle, ctx: Ctx) -> Result<String, String> {
     })?;
 
     *ctx.recorder.lock().unwrap() = Some(rec.clone());
-    eprintln!("[rec] started → {}, codec={}, fps={}, bitrate={}kbps", out_path.display(), s.codec, s.fps, bitrate);
+    eprintln!(
+        "[rec] started → {}, codec={}, fps={}, {}x{} (src {}x{}, scale_width={}), bitrate={}kbps",
+        out_path.display(),
+        s.codec,
+        s.fps,
+        out_w,
+        out_h,
+        est_w,
+        est_h,
+        s.scale_width,
+        bitrate
+    );
     Ok(out_path.to_string_lossy().into_owned())
 }
 
