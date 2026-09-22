@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 import { Button, List } from "antd";
 import {
   AppstoreOutlined,
+  CameraOutlined,
   CloseOutlined,
-  UnorderedListOutlined,
 } from "@ant-design/icons";
 import { LogicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
@@ -127,7 +127,7 @@ export function ToolbarPage() {
           <Button
             type={histOpen ? "default" : "text"}
             className="!h-8 !w-8 !min-w-8 !p-0"
-            icon={<UnorderedListOutlined />}
+            icon={<CameraOutlined />}
             onClick={async () => {
               const next = !histOpen;
               setHistOpen(next);

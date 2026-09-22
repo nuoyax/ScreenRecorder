@@ -203,7 +203,7 @@ export function RegionSelectPage() {
   const canConfirm = pending !== null;
 
   return (
-    <div className="flex h-screen select-none flex-col bg-black text-ink">
+    <div className="flex h-screen select-none flex-col text-ink">
       <div
         ref={stageRef}
         className="relative min-h-0 flex-1 cursor-crosshair overflow-hidden"
@@ -213,12 +213,13 @@ export function RegionSelectPage() {
         onPointerCancel={onPointerUp}
       >
         {preview ? (
+          // Dimmed, so the live desktop underneath is visible but out of the way.
           <img
             ref={imgRef}
             src={preview.data_url}
             alt="屏幕预览"
             draggable={false}
-            className="pointer-events-none absolute inset-0 h-full w-full"
+            className="pointer-events-none absolute inset-0 h-full w-full opacity-40"
           />
         ) : (
           !error && (
@@ -228,11 +229,71 @@ export function RegionSelectPage() {
           )
         )}
 
-        {box && box.w > 0 && box.h > 0 && (
-          <div
-            className="pointer-events-none absolute border-2 border-rec"
-            style={{ left: box.x, top: box.y, width: box.w, height: box.h }}
-          />
+        {/*
+          WeChat-style selection: the four panes outside the rectangle are dimmed,
+          which both marks the selection and makes it obvious that the screen itself
+          is still live underneath — the window is transparent, so nothing is drawn
+          inside the rectangle at all and the desktop shows through at full strength.
+          Panes instead of one overlay with a hole cut in it: the pane edges are the
+          border, so there is nothing to recompute on every pointer move.
+        */}
+        {preview && box && box.w > 0 && box.h > 0 && (
+          <div className="pointer-events-none absolute inset-0">
+            <div
+              className="absolute inset-x-0 top-0 bg-black/45"
+              style={{ height: box.y }}
+            />
+            <div
+              className="absolute inset-x-0 bg-black/45"
+              style={{ top: box.y + box.h, bottom: 0 }}
+            />
+            <div
+              className="absolute left-0 bg-black/45"
+              style={{ top: box.y, height: box.h, width: box.x }}
+            />
+            <div
+              className="absolute right-0 bg-black/45"
+              style={{ top: box.y, height: box.h, left: box.x + box.w }}
+            />
+
+            <div
+              className="absolute border border-rec"
+              style={{ left: box.x, top: box.y, width: box.w, height: box.h }}
+            >
+              {/*
+                Handles, as in the screenshot tools they will be recognised from.
+                They are decoration only: this picker is drag-to-draw, not
+                drag-to-resize, so they are deliberately inert.
+              */}
+              {[
+                [-4, -4],
+                [box.w - 4, -4],
+                [-4, box.h - 4],
+                [box.w - 4, box.h - 4],
+              ].map(([x, y]) => (
+                <span
+                  key={`${x},${y}`}
+                  className="absolute h-2 w-2 border border-black/60 bg-white"
+                  style={{ left: x, top: y }}
+                />
+              ))}
+            </div>
+
+            {/* Size readout, in the monitor pixels the backend will store rather than
+                the CSS pixels the rectangle is drawn in. Hidden while the drag is too
+                small to become a region at all. */}
+            {pending && (
+              <div
+                className="absolute rounded bg-black/70 px-1.5 py-0.5 text-[11px] tabular-nums text-white"
+                style={{
+                  left: Math.max(0, Math.min(box.x, (stageRef.current?.clientWidth ?? 0) - 92)),
+                  top: box.y > 26 ? box.y - 24 : box.y + box.h + 6,
+                }}
+              >
+                {pending[2]} × {pending[3]}
+              </div>
+            )}
+          </div>
         )}
       </div>
 

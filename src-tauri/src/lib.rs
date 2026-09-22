@@ -644,17 +644,20 @@ fn region_target(ctx: Ctx) -> String {
     ctx.region_target.lock().unwrap().clone()
 }
 
-/// Show the region picker over `monitor_id` (creating the window on first use).
+/// Show the region picker over `monitor_id`.
 ///
 /// The window is an ordinary opaque WebView2 window sized to the monitor, not a
 /// Win32 overlay: the frontend stays the only thing drawing UI, and the still frame
 /// comes from the command above rather than from any screenshot API the webview
 /// would otherwise need.
+///
+/// It is created once in `setup` and only moved and shown here, because creating a
+/// webview means pumping this thread's message queue — see the note there.
 #[tauri::command]
 fn open_region_picker(app: AppHandle, ctx: Ctx, monitor_id: String) -> Result<(), String> {
     let mon = capture::still::monitor_info(&monitor_id)?;
-    // Recorded before the window is created: the page asks for it on mount, and a
-    // fresh window's first invoke can land before the builder call returns.
+    // Set before the window is shown: the page asks for it on mount, and asking after
+    // is a second round trip the user would see as the picker coming up blank.
     *ctx.region_target.lock().unwrap() = monitor_id.clone();
 
     // Monitor rectangles are physical pixels; `position`/`inner_size` take *logical*
@@ -672,52 +675,25 @@ fn open_region_picker(app: AppHandle, ctx: Ctx, monitor_id: String) -> Result<()
         (mon.height.max(1) as f64 / scale).ceil(),
     );
 
-    if let Some(w) = app.get_webview_window("region-select") {
-        // Reuse the existing window, but move it if the user picked another monitor.
-        let _ = w.set_position(tauri::LogicalPosition::new(logical_x, logical_y));
-        let _ = w.set_size(tauri::LogicalSize::new(logical_w, logical_h));
-        let _ = w.show();
-        let _ = w.set_focus();
-        // An already-mounted page has to be told the target changed.
-        let _ = app.emit("region-target", monitor_id);
-        return Ok(());
-    }
-
-    let win = tauri::WebviewWindowBuilder::new(
-        &app,
-        "region-select",
-        tauri::WebviewUrl::App("region-select.html".into()),
-    )
-    .title("选择录制区域")
-    .position(logical_x, logical_y)
-    .inner_size(logical_w, logical_h)
-    .decorations(false)
-    .shadow(false)
-    .always_on_top(true)
-    .resizable(false)
-    .skip_taskbar(true)
-    .background_color(tauri::window::Color(0x00, 0x00, 0x00, 0xff))
-    .build()
-    .map_err(|e| format!("无法打开区域选择窗口：{e}"))?;
-
-    // Keep it out of any capture even though picking normally happens while idle:
-    // a recording left running would otherwise film the picker covering the screen.
-    unsafe {
-        use windows::Win32::UI::WindowsAndMessaging::{
-            SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
-        };
-        if let Ok(hwnd) = win.hwnd() {
-            let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
-        }
-    }
-    let _ = win.set_focus();
+    let w = app
+        .get_webview_window("region-select")
+        .ok_or("区域选择窗口未创建")?;
+    let _ = w.set_position(tauri::LogicalPosition::new(logical_x, logical_y));
+    let _ = w.set_size(tauri::LogicalSize::new(logical_w, logical_h));
+    let _ = w.show();
+    let _ = w.set_focus();
+    // The page picks up the new still from these; the window itself is long-lived, so
+    // "show" alone would leave the previous monitor's frame on screen.
+    let _ = app.emit("region-target", monitor_id);
     Ok(())
 }
 
 #[tauri::command]
 fn close_region_picker(app: AppHandle) {
+    // Hidden, not closed: the window is built once in `setup` and reused, so that
+    // opening the picker never has to create a webview from inside a command.
     if let Some(w) = app.get_webview_window("region-select") {
-        let _ = w.close();
+        let _ = w.hide();
     }
 }
 
@@ -745,8 +721,9 @@ fn apply_region(
         settings::save(&app, &s);
     }
     let _ = app.emit("region-selected", region);
+    // Hidden rather than closed — the window is reused (see `close_region_picker`).
     if let Some(w) = app.get_webview_window("region-select") {
-        let _ = w.close();
+        let _ = w.hide();
     }
 }
 
@@ -795,6 +772,53 @@ pub fn run() {
             let handle = app.handle().clone();
             let s = settings::load(&handle);
             *handle.state::<AppState>().settings.lock().unwrap() = s.clone();
+
+            // Region picker, built now and hidden until asked for.
+            //
+            // Creating a WebView2 window is not something a command can do on demand:
+            // `WebviewWindowBuilder::build` reaches wry's `wait_with_pump`, which pumps
+            // messages on the calling thread until the controller is ready. A synchronous
+            // command runs on the event-loop thread, so that pump nests inside the message
+            // dispatch it was invoked from and never returns — the app stops repainting
+            // (black window, "not responding") with the webview left on about:blank.
+            // Built here instead, before the loop starts, exactly like the toolbar above,
+            // where the pump is the only thing running.
+            let picker = tauri::WebviewWindowBuilder::new(
+                app,
+                "region-select",
+                tauri::WebviewUrl::App("region-select.html".into()),
+            )
+            .title("选择录制区域")
+            .decorations(false)
+            .shadow(false)
+            .always_on_top(true)
+            .resizable(false)
+            .skip_taskbar(true)
+            .visible(false)
+            // Transparent, like the toolbar: the picker is a dimming sheet over the live
+            // desktop, not a picture of it. An opaque window would hide whatever changed
+            // between the still and the moment the user drags.
+            .transparent(true)
+            .background_color(tauri::window::Color(0x00, 0x00, 0x00, 0x00))
+            .build();
+            match picker {
+                Ok(win) => {
+                    // Keep it out of any capture even though picking normally happens while
+                    // idle: a recording left running would otherwise film the picker covering
+                    // the screen.
+                    unsafe {
+                        use windows::Win32::UI::WindowsAndMessaging::{
+                            SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
+                        };
+                        if let Ok(hwnd) = win.hwnd() {
+                            let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+                        }
+                    }
+                }
+                // Not fatal: everything else works, and `open_region_picker` reports the
+                // missing window rather than failing silently when the button is pressed.
+                Err(e) => eprintln!("[picker] window could not be created: {e}"),
+            }
 
             // floating toolbar (always-on-top, frameless, small) pinned bottom-right,
             // excluded from screen capture so it never appears in recordings
