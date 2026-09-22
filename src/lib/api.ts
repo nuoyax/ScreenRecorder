@@ -146,6 +146,13 @@ export type ExportResult = {
   format: string;
 };
 
+/** What a transcode produced. `log` is ffmpeg's own tail, shown rather than swallowed. */
+export type TranscodeResult = {
+  path: string;
+  bytes: number;
+  log: string;
+};
+
 export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) =>
@@ -200,6 +207,21 @@ export const api = {
   ipcRawSupported: () => invoke<boolean>("ipc_raw_supported", new Uint8Array([0, 0, 0, 0])),
   /** Locate `ffmpeg` for the transcode card. Cached in Rust after the first call. */
   ffmpegStatus: () => invoke<FfmpegStatus>("ffmpeg_status"),
+  /**
+   * Re-encode an existing MP4 through the user's own `ffmpeg`.
+   *
+   * Resolves only when the encode finishes — ffmpeg runs for as long as the file takes,
+   * so the caller must show that wait rather than a spinner that could mean anything.
+   * Rejects with ffmpeg's own stderr when it fails, and with the install hint when there
+   * is no ffmpeg to run.
+   */
+  exportTranscode: (args: {
+    input: string;
+    output: string;
+    bitrateBps: number;
+    fps: number;
+    codec: string;
+  }) => invoke<TranscodeResult>("export_transcode", args),
   /** Open a streaming GIF export. Fails before any rendering if the target is unusable. */
   exportSetup: (args: {
     path: string;

@@ -417,6 +417,51 @@ fn ffmpeg_status() -> export::probe::FfmpegStatus {
     export::probe::status()
 }
 
+/// Transcode a recording to MP4 through the user's own `ffmpeg`.
+///
+/// The bitrate is computed in TypeScript, where the quality presets and the
+/// never-worse-than-source rule already live; duplicating that policy in Rust would give
+/// two answers to the same question. Whatever arrives is clamped here anyway, because a
+/// bitrate of zero or of a terabit is a bug or a lie rather than a preference.
+///
+/// A missing ffmpeg is reported as the install hint, not as a failure: it is a state of
+/// the machine, not an error in the request.
+///
+/// `async` with `spawn_blocking` rather than a plain function: ffmpeg is a child process
+/// that runs for as long as the encode takes, and a synchronous command would hold the
+/// runtime thread for that whole time.
+#[tauri::command]
+async fn export_transcode(
+    input: String,
+    output: String,
+    bitrate_bps: u64,
+    fps: u32,
+    codec: String,
+) -> Result<export::transcode::TranscodeResult, String> {
+    if input.trim().is_empty() || output.trim().is_empty() {
+        return Err("需要源文件与输出路径".to_string());
+    }
+    // 1 kbps floor and a 1 Gbps ceiling: below the former the encoder refuses, above the
+    // latter the request is a typo (or an attempt to fill the user's disk).
+    const MIN_BPS: u64 = 1_000;
+    const MAX_BPS: u64 = 1_000_000_000;
+    let bitrate_bps = bitrate_bps.clamp(MIN_BPS, MAX_BPS);
+    // 0 means "leave the rate alone" and is passed through as such.
+    let fps = if fps == 0 { 0 } else { fps.clamp(1, 240) };
+    tauri::async_runtime::spawn_blocking(move || {
+        export::transcode::run(&export::transcode::TranscodeOptions {
+            input,
+            output,
+            bitrate_bps,
+            fps,
+            codec,
+            reencode: true,
+        })
+    })
+    .await
+    .map_err(|e| format!("转码任务无法调度：{e}"))?
+}
+
 /// Begin a streaming GIF export.
 ///
 /// The header and loop extension are written now, so a bad frame count or an
@@ -755,6 +800,7 @@ pub fn run() {
             allow_asset,
             ipc_raw_supported,
             ffmpeg_status,
+            export_transcode,
             export_setup,
             export_push_frame,
             export_finish,

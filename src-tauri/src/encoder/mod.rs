@@ -35,17 +35,26 @@ fn hr<T>(v: windows::core::Result<T>) -> Result<T, String> {
     v.map_err(|e| format!("MF error: {e}"))
 }
 
+/// Bring Media Foundation up, once for the life of the process.
+///
+/// Not a refcount to balance: MF is process-wide state, and several things use it at
+/// once — the recorder's sink writer, the export path's source readers, the exporter's
+/// own sink writer. Shutting it down when any one of them finishes would pull the
+/// platform out from under the others, which hangs rather than fails. So it starts once
+/// and is never torn down; the OS reclaims it at exit.
 pub fn mf_init() {
-    unsafe {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
         let _ = MFStartup(MF_VERSION, 0);
-    }
+    });
 }
 
-pub fn mf_shutdown() {
-    unsafe {
-        let _ = MFShutdown();
-    }
-}
+/// Retained for callers that previously balanced [`mf_init`].
+///
+/// Deliberately does nothing. `MFShutdown` here would break every other user of Media
+/// Foundation in the process — including a recording that is still in progress when an
+/// export finishes.
+pub fn mf_shutdown() {}
 
 /// pack (num, den) into the UINT64 layout MF uses for size/ratio attributes
 fn pack_u64(hi: u64, lo: u64) -> u64 {

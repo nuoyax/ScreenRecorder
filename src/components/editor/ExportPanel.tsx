@@ -15,7 +15,7 @@ import { ExportCancelled, exportGif, type ExportProgress } from "@/lib/export/gi
 import { DEFAULT_STICKER, exportSticker } from "@/lib/export/imgSticker";
 import { exportDirFor, exportNameFor, joinPath } from "@/lib/export/paths";
 import { formatTimecode } from "@/lib/timeline/time";
-import { api, type ExportResult, type FfmpegStatus, type MouseTrack } from "@/lib/api";
+import { api, type ExportResult, type FfmpegStatus, type MouseTrack, type TranscodeResult } from "@/lib/api";
 
 const { Text } = Typography;
 
@@ -67,12 +67,14 @@ export function ExportPanel({
 }: Props) {
   const [quality, setQuality] = useState<ExportQuality>("high");
   const [fps, setFps] = useState(project.fps || 30);
+  const [codec, setCodec] = useState<"h264" | "h265">("h264");
   const [gifFps, setGifFps] = useState(Math.min(15, project.fps || 30));
   const [stickerPad, setStickerPad] = useState(DEFAULT_STICKER.padding);
   const [stickerRadius, setStickerRadius] = useState(DEFAULT_STICKER.radius);
-  const [busy, setBusy] = useState<"gif" | "sticker" | null>(null);
+  const [busy, setBusy] = useState<"gif" | "sticker" | "transcode" | null>(null);
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [result, setResult] = useState<ExportResult | null>(null);
+  const [transcoded, setTranscoded] = useState<TranscodeResult | null>(null);
   const [error, setError] = useState("");
   const [ffmpeg, setFfmpeg] = useState<FfmpegStatus | null>(null);
   const [rawIpc, setRawIpc] = useState<boolean | null>(null);
@@ -198,6 +200,35 @@ export function ExportPanel({
   };
 
   const blocked = rawIpc === false;
+
+  /**
+   * Transcode the recording this project was opened from.
+   *
+   * The source, not the composition: ffmpeg is handed the recorded file and re-encodes
+   * it, so the output carries the original pixels at a new bitrate and rate. Zoom,
+   * annotations and the background are *not* in it — they live only in the canvas-based
+   * exports. The card says so rather than letting the MP4 look like the finished piece.
+   */
+  const runTranscode = async () => {
+    setError("");
+    setTranscoded(null);
+    setBusy("transcode");
+    try {
+      const out = joinPath(exportDir, exportNameFor(project.sourcePath, "-transcoded", "mp4"));
+      const res = await api.exportTranscode({
+        input: project.sourcePath,
+        output: out,
+        bitrateBps: targetBps,
+        fps,
+        codec,
+      });
+      setTranscoded(res);
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   return (
     <div className="space-y-3">
@@ -351,6 +382,16 @@ export function ExportPanel({
             onChange={setFps}
             options={[24, 30, 60].map((v) => ({ value: v, label: `${v} fps` }))}
           />
+          <Select
+            size="small"
+            className="w-[92px]"
+            value={codec}
+            onChange={(v) => setCodec(v as "h264" | "h265")}
+            options={[
+              { value: "h264", label: "H.264" },
+              { value: "h265", label: "H.265" },
+            ]}
+          />
         </div>
         <div className="mt-1.5 flex items-center gap-2 text-xs">
           <span className="text-muted">目标码率</span>
@@ -364,29 +405,47 @@ export function ExportPanel({
             {ffmpeg.version && <div className="mt-0.5 break-all text-muted">{ffmpeg.version}</div>}
           </div>
         ) : (
-          <>
-            <Button className="mt-2" size="small" block disabled>
-              转码（需要 ffmpeg）
-            </Button>
-            <p className="mt-1.5 text-[11px] text-muted">
-              {ffmpeg?.hint || "正在检测 ffmpeg…"}
-            </p>
-          </>
+          <p className="mt-1.5 text-[11px] text-muted">{ffmpeg?.hint || "正在检测 ffmpeg…"}</p>
         )}
-        {ffmpeg?.available && (
-          <Alert
-            className="mt-2"
-            type="info"
-            showIcon
-            message="转码命令将在下一任务接通"
-            description={
-              <span className="text-[11px]">
-                ffmpeg 已就位，码率与帧率如上；命令行封装尚未实现，此处如实标注，不假装可用。
-              </span>
-            }
-          />
-        )}
+        <Button
+          className="mt-2"
+          size="small"
+          block
+          disabled={!ffmpeg?.available || busy !== null}
+          loading={busy === "transcode"}
+          onClick={() => void runTranscode()}
+        >
+          {ffmpeg?.available ? "转码并另存为 MP4" : "转码（需要 ffmpeg）"}
+        </Button>
+        <p className="mt-1.5 text-[11px] text-muted">
+          转码处理的是<strong>原始录制文件</strong>：保留源画面并按上面的码率/帧率重编码。缩放、注释与背景
+          不在其中 —— 它们只进入 GIF / PNG / 贴纸。
+        </p>
       </Card>
+
+      {transcoded && (
+        <Alert
+          type="success"
+          showIcon
+          message={`转码完成（${mb(transcoded.bytes)}）`}
+          description={
+            <div className="text-[11px]">
+              <div className="break-all">{transcoded.path}</div>
+              {transcoded.log && (
+                <details className="mt-1">
+                  <summary className="cursor-pointer text-muted">ffmpeg 输出</summary>
+                  <pre className="mt-1 whitespace-pre-wrap break-all text-muted">{transcoded.log}</pre>
+                </details>
+              )}
+              <Space className="mt-1">
+                <Button size="small" onClick={() => void api.openFile(transcoded.path)}>
+                  在文件夹中显示
+                </Button>
+              </Space>
+            </div>
+          }
+        />
+      )}
 
       <Alert
         type="info"
