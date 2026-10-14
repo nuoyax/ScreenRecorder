@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Suspense, lazy, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Button,
   Input,
@@ -13,11 +13,14 @@ import {
 } from "antd";
 import { Transport } from "@/components/Transport";
 import { CountdownOverlay } from "@/components/CountdownOverlay";
-import { EditorPage } from "@/pages/EditorPage";
 import { api, type HistoryEntry, type Settings, type SourceLists, type MicrophoneInfo } from "@/lib/api";
 import { fileName, formatDuration } from "@/lib/format";
 import { useCountdown } from "@/hooks/useCountdown";
 import { useRecordingState } from "@/hooks/useRecordingState";
+
+const EditorPage = lazy(() =>
+  import("@/pages/EditorPage").then((m) => ({ default: m.EditorPage })),
+);
 
 const { Text, Title } = Typography;
 
@@ -59,20 +62,33 @@ export function MainPage() {
   const [view, setView] = useState<"record" | "editor">("record");
   const [editTarget, setEditTarget] = useState<string | null>(null);
   const skipSave = useRef(true);
+  /** Skip the mount run; initial `listSources` already comes from Promise.all. */
+  const skipSourceRefresh = useRef(true);
   const prevState = useRef(state);
 
   const patch = (partial: Partial<Settings>) =>
     setSettings((s) => ({ ...s, ...partial }));
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
-      const s = await api.getSettings();
+      // Parallel IPC: sequential awaits were adding up on cold start.
+      const [s, sources, mics, history] = await Promise.all([
+        api.getSettings(),
+        api.listSources(),
+        api.listMicrophones(),
+        api.listRecordings(),
+      ]);
+      if (cancelled) return;
       setSettings({ ...defaultSettings(), ...s, region: s.region ?? [0, 0, 1280, 720] });
-      setSources(await api.listSources());
-      setMics(await api.listMicrophones());
-      setHistory(await api.listRecordings());
+      setSources(sources);
+      setMics(mics);
+      setHistory(history);
       skipSave.current = false;
     })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -107,6 +123,10 @@ export function MainPage() {
   }, []);
 
   useEffect(() => {
+    if (skipSourceRefresh.current) {
+      skipSourceRefresh.current = false;
+      return;
+    }
     api.listSources().then(setSources).catch(() => undefined);
   }, [settings.source_kind]);
 
@@ -144,14 +164,22 @@ export function MainPage() {
   // Placed after every hook so switching views cannot change the hook order.
   if (view === "editor") {
     return (
-      <EditorPage
-        sourcePath={editTarget}
-        onBack={() => setView("record")}
-        onPickRecording={() => {
-          setView("record");
-          setHint("在「最近」里点某条录制的「编辑」即可打开编辑器");
-        }}
-      />
+      <Suspense
+        fallback={
+          <div className="grid min-h-screen place-items-center bg-canvas text-sm text-muted">
+            正在打开编辑器…
+          </div>
+        }
+      >
+        <EditorPage
+          sourcePath={editTarget}
+          onBack={() => setView("record")}
+          onPickRecording={() => {
+            setView("record");
+            setHint("在「最近」里点某条录制的「编辑」即可打开编辑器");
+          }}
+        />
+      </Suspense>
     );
   }
 

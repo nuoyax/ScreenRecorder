@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { ConfigProvider } from "antd";
 import { MainPage } from "@/pages/MainPage";
 import { appTheme } from "@/theme";
+import { revealWindowWhenReady } from "@/lib/revealWindow";
 import "@/styles.css";
 
 createRoot(document.getElementById("root")!).render(
@@ -12,3 +13,5 @@ createRoot(document.getElementById("root")!).render(
     </ConfigProvider>
   </StrictMode>,
 );
+
+revealWindowWhenReady();

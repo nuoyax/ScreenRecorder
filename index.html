@@ -4,9 +4,27 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ScreenRecorder</title>
+    <!-- Inline before any CSS/JS so WebView2 never flashes white -->
+    <style>
+      html,
+      body,
+      #root {
+        margin: 0;
+        min-height: 100%;
+        background: #12141a;
+        color: #eceef2;
+      }
+      #boot {
+        display: grid;
+        place-items: center;
+        min-height: 100vh;
+        font: 13px/1.4 "Segoe UI Variable", "Segoe UI", sans-serif;
+        color: #8b90a0;
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><div id="boot">加载中…</div></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

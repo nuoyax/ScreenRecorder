@@ -170,70 +170,70 @@ export function EditorPage({ sourcePath, onBack, onPickRecording }: Props) {
   const project = state?.project ?? null;
   const total = project ? durationMs(project) : 0;
 
-  /** Draw one composed frame at the playhead into the preview canvas. */
-  const renderFrame = useCallback(async () => {
-    const current = stateRef.current;
-    const canvas = canvasRef.current;
-    const video = videoRef.current;
-    if (!current || !canvas || !video) return;
-    const composed = current.project;
+  /** Paint one composed frame. When `seek` is false the video element is already
+   *  showing the right moment (playback), so seeking would only fight the decoder. */
+  const paintFrame = useCallback(
+    (playheadMs: number, seek: boolean) => {
+      const current = stateRef.current;
+      const canvas = canvasRef.current;
+      const video = videoRef.current;
+      if (!current || !canvas || !video) return;
+      const composed = current.project;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
 
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+      const sourceMs = Math.min(
+        composed.sourceDurationMs,
+        sourceTimeForPlayhead(composed, playheadMs),
+      );
 
-    // Seeking is what makes this frame the right one; while playing, the video element
-    // is the clock instead and the browser hands us frames on its own.
-    const sourceMs = Math.min(
-      composed.sourceDurationMs,
-      sourceTimeForPlayhead(composed, current.playheadMs),
-    );
-    await seekTo(video, sourceMs);
+      const draw = () => {
+        const source: FrameSource = {
+          image: video,
+          imageWidth: video.videoWidth,
+          imageHeight: video.videoHeight,
+        };
+        drawFrame(ctx, canvas.width, canvas.height, source, {
+          background: composed.background,
+          crop: composed.crop,
+          zoom: zoomAt(composed, playheadMs),
+          annotations: annotationsAt(composed, playheadMs),
+          timeMs: playheadMs,
+          // The cursor track is stamped against the recording, not the timeline, so after a
+          // trim or a speed change these are different numbers — and using the timeline
+          // position would slide every click by however much was trimmed.
+          sourceTimeMs: sourceMs,
+          moves: track?.moves ?? [],
+          clicks: track?.clicks ?? [],
+          captureOrigin: track?.rect ?? {
+            x: 0,
+            y: 0,
+            width: composed.sourceWidth,
+            height: composed.sourceHeight,
+          },
+          showCursor: track !== null,
+          clickHighlight: track !== null,
+        });
+      };
 
-    const source: FrameSource = {
-      image: video,
-      imageWidth: video.videoWidth,
-      imageHeight: video.videoHeight,
-    };
-    drawFrame(ctx, canvas.width, canvas.height, source, {
-      background: composed.background,
-      crop: composed.crop,
-      zoom: zoomAt(composed, current.playheadMs),
-      annotations: annotationsAt(composed, current.playheadMs),
-      timeMs: current.playheadMs,
-      // The cursor track is stamped against the recording, not the timeline, so after a
-      // trim or a speed change these are different numbers — and using the timeline
-      // position would slide every click by however much was trimmed.
-      sourceTimeMs: sourceMs,
-      moves: track?.moves ?? [],
-      clicks: track?.clicks ?? [],
-      // The rectangle the recording covered, so absolute cursor samples land in the
-      // right place. Recordings made before that was stored fall back to the whole
-      // frame, which is right for a full-screen capture and the best available guess
-      // otherwise.
-      captureOrigin: track?.rect ?? {
-        x: 0,
-        y: 0,
-        width: composed.sourceWidth,
-        height: composed.sourceHeight,
-      },
-      // The editor always draws its own cursor when a track exists. The recorded
-      // frames carry the OS cursor only if the user asked for it at record time, and
-      // drawing on top when they did would show two cursors.
-      showCursor: track !== null,
-      clickHighlight: track !== null,
-    });
-  }, [track]);
+      if (!seek) {
+        draw();
+        return;
+      }
+      void seekTo(video, sourceMs).then(draw);
+    },
+    [track],
+  );
 
-  // Re-render on every change, except while playback owns the video element: seeking
-  // it there would fight the playback loop for the decoder.
+  // Scrub / edit: seek + redraw. Skipped while playback owns the decoder.
   useEffect(() => {
-    if (playing) return;
-    void renderFrame();
-  }, [renderFrame, playing, state]);
+    if (playing || !state) return;
+    paintFrame(state.playheadMs, true);
+  }, [paintFrame, playing, state]);
 
-  // Playback loop: the video plays at the clip's rate and the playhead follows the
-  // wall clock. Depending only on `playing`/`total` keeps the loop from restarting as
-  // it advances the playhead.
+  // Playback: video is the clock; canvas is redrawn each frame. Playhead is kept in a
+  // ref and only pushed into React ~10×/s so the timeline/timecode update without
+  // re-rendering the whole editor sixty times a second.
   useEffect(() => {
     if (!playing) return;
     const video = videoRef.current;
@@ -242,19 +242,44 @@ export function EditorPage({ sourcePath, onBack, onPickRecording }: Props) {
 
     playStartRef.current = current.playheadMs;
     video.currentTime = sourceTimeForPlayhead(current.project, current.playheadMs) / 1000;
+    video.playbackRate = Math.max(
+      0.0625,
+      Math.min(16, playbackRateAt(current.project, current.playheadMs)),
+    );
     video.play().catch(() => undefined);
 
     const startedAt = performance.now();
     const startMs = playStartRef.current;
+    let lastUi = 0;
+    let lastRate = video.playbackRate;
 
     const tick = () => {
       const next = startMs + (performance.now() - startedAt);
+      const live = stateRef.current;
+      if (!live) return;
+
       if (next >= total) {
+        stateRef.current = { ...live, playheadMs: total };
         setState((s) => (s ? { ...s, playheadMs: total } : s));
         setPlaying(false);
         return;
       }
-      setState((s) => (s ? { ...s, playheadMs: next } : s));
+
+      stateRef.current = { ...live, playheadMs: next };
+      paintFrame(next, false);
+
+      // Keep playbackRate in step when the playhead crosses into a different-speed clip.
+      const rate = Math.max(0.0625, Math.min(16, playbackRateAt(live.project, next)));
+      if (rate !== lastRate) {
+        lastRate = rate;
+        video.playbackRate = rate;
+      }
+
+      const now = performance.now();
+      if (now - lastUi >= 100) {
+        lastUi = now;
+        setState((s) => (s ? { ...s, playheadMs: next } : s));
+      }
       rafRef.current = requestAnimationFrame(tick);
     };
     rafRef.current = requestAnimationFrame(tick);
@@ -263,17 +288,11 @@ export function EditorPage({ sourcePath, onBack, onPickRecording }: Props) {
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
       video.pause();
+      // Flush the latest playhead so pause / scrub lands where playback stopped.
+      const final = stateRef.current;
+      if (final) setState((s) => (s ? { ...s, playheadMs: final.playheadMs } : s));
     };
-  }, [playing, total]);
-
-  // Keep the decoder's rate in step with the clip under the playhead, so a 2x clip is
-  // actually watched at 2x rather than the playhead running away from the picture.
-  useEffect(() => {
-    const video = videoRef.current;
-    if (video && project && state) {
-      video.playbackRate = Math.max(0.0625, Math.min(16, playbackRateAt(project, state.playheadMs)));
-    }
-  }, [project, state]);
+  }, [playing, total, paintFrame]);
 
   const saveProject = useCallback(async () => {
     const current = stateRef.current;
@@ -287,13 +306,12 @@ export function EditorPage({ sourcePath, onBack, onPickRecording }: Props) {
     }
   }, []);
 
-  // Save on a debounce: every drag produces many states and a write per state would
-  // hammer the disk. Also saves on unmount so the last edit is never lost.
+  // Save on project edits only — playhead scrubbing must not hammer the disk.
   useEffect(() => {
-    if (!state) return;
+    if (!project) return;
     const timer = window.setTimeout(() => void saveProject(), 800);
     return () => window.clearTimeout(timer);
-  }, [state, saveProject]);
+  }, [project, saveProject]);
 
   useEffect(() => () => void saveProject(), [saveProject]);
 

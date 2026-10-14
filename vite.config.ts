@@ -24,11 +24,28 @@ export default defineConfig({
   envPrefix: ["VITE_", "TAURI_"],
   build: {
     target: "esnext",
+    cssCodeSplit: true,
     rollupOptions: {
       input: {
         main: resolve(__dirname, "index.html"),
         toolbar: resolve(__dirname, "toolbar.html"),
         "region-select": resolve(__dirname, "region-select.html"),
+      },
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules/antd") || id.includes("node_modules/@ant-design")) {
+            return "antd";
+          }
+          if (id.includes("node_modules/react-dom") || id.includes("node_modules/react/")) {
+            return "react";
+          }
+          if (id.includes("/src/pages/EditorPage") || id.includes("/src/components/editor/")) {
+            return "editor";
+          }
+          if (id.includes("/src/lib/editor/") || id.includes("/src/lib/export/")) {
+            return "editor-lib";
+          }
+        },
       },
     },
   },

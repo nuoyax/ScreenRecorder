@@ -819,6 +819,36 @@ pub fn run() {
             let s = settings::load(&handle);
             *handle.state::<AppState>().settings.lock().unwrap() = s.clone();
 
+            // Toolbar first: it is the smallest webview and what the user sees immediately.
+            // Building the hidden region-picker before it used to delay first paint.
+            let toolbar = tauri::WebviewWindowBuilder::new(
+                app,
+                "toolbar",
+                tauri::WebviewUrl::App("toolbar.html".into()),
+            )
+            .title("Toolbar")
+            .inner_size(260.0, 56.0)
+            .decorations(false)
+            .shadow(false)
+            .always_on_top(true)
+            .resizable(false)
+            .skip_taskbar(true)
+            .transparent(true)
+            .background_color(tauri::window::Color(0x12, 0x14, 0x1a, 0xff))
+            .build();
+            if let Ok(tb) = toolbar {
+                let _ = pin_bottom_right(&tb);
+                // WDA_EXCLUDEFROMCAPTURE: keep the toolbar out of recorded frames
+                unsafe {
+                    use windows::Win32::UI::WindowsAndMessaging::{
+                        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
+                    };
+                    if let Ok(hwnd) = tb.hwnd() {
+                        let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+                    }
+                }
+            }
+
             // Region picker, built now and hidden until asked for.
             //
             // Creating a WebView2 window is not something a command can do on demand:
@@ -827,8 +857,8 @@ pub fn run() {
             // command runs on the event-loop thread, so that pump nests inside the message
             // dispatch it was invoked from and never returns — the app stops repainting
             // (black window, "not responding") with the webview left on about:blank.
-            // Built here instead, before the loop starts, exactly like the toolbar above,
-            // where the pump is the only thing running.
+            // Built here instead, before the loop starts, where the pump is the only
+            // thing running.
             let picker = tauri::WebviewWindowBuilder::new(
                 app,
                 "region-select",
@@ -866,37 +896,6 @@ pub fn run() {
                 Err(e) => eprintln!("[picker] window could not be created: {e}"),
             }
 
-            // floating toolbar (always-on-top, frameless, small) pinned bottom-right,
-            // excluded from screen capture so it never appears in recordings
-            let toolbar = tauri::WebviewWindowBuilder::new(
-                app,
-                "toolbar",
-                tauri::WebviewUrl::App("toolbar.html".into()),
-            )
-            .title("Toolbar")
-            .inner_size(260.0, 56.0)
-            .decorations(false)
-            .shadow(false)
-            .always_on_top(true)
-            .resizable(false)
-            .skip_taskbar(true)
-            .transparent(true)
-            .background_color(tauri::window::Color(0x12, 0x14, 0x1a, 0xff))
-            .build();
-            if let Ok(tb) = toolbar {
-                let _ = pin_bottom_right(&tb);
-                let _ = tb.set_focus();
-                // WDA_EXCLUDEFROMCAPTURE: keep the toolbar out of recorded frames
-                unsafe {
-                    use windows::Win32::UI::WindowsAndMessaging::{
-                        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
-                    };
-                    if let Ok(hwnd) = tb.hwnd() {
-                        let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
-                    }
-                }
-            }
-
             // progress emitter
             let h2 = handle.clone();
             std::thread::spawn(move || loop {
@@ -907,13 +906,20 @@ pub fn run() {
                 }
             });
 
-            // closing the main window quits the app entirely
+            // Main starts hidden (see tauri.conf) so the dark HTML shell can paint before
+            // show — avoids a white WebView2 flash. Frontend calls show() after first paint;
+            // this is a safety net if that never runs.
             if let Some(main) = app.get_webview_window("main") {
+                let main_fallback = main.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(2500));
+                    let _ = main_fallback.show();
+                });
+
                 let handle_for_close = handle.clone();
                 main.on_window_event(move |event| {
                     if let tauri::WindowEvent::Destroyed { .. } = event {
                         // main window closed by user → exit everything
-                        let _ = handle_for_close;
                         handle_for_close.exit(0);
                     }
                 });
