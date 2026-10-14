@@ -96,7 +96,7 @@ npm run tauri dev
 
 默认输出：`视频\ScreenRecord\recording_YYYYMMDD_HHMMSS.mp4`
 
-开启光标采样后，录制文件旁会写出光标轨迹副文件 `<recording>.mp4.mouse.json`。
+默认会在录制文件旁写出光标轨迹副文件 `<recording>.mp4.mouse.json`；仅当光标绘制与点击高亮同时关闭时才跳过。
 
 ### 剪辑与导出
 

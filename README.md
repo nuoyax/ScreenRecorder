@@ -96,7 +96,7 @@ The binary is produced at `src-tauri/target/release/screen-recorder.exe`.
 
 Default output: `Videos\ScreenRecord\recording_YYYYMMDD_HHMMSS.mp4`
 
-With cursor sampling on, a sidecar cursor track is written beside it as `<recording>.mp4.mouse.json`.
+By default a sidecar cursor track is written beside it as `<recording>.mp4.mouse.json`; it is skipped only when both cursor drawing and click highlighting are off.
 
 ### Editing & exporting
 
