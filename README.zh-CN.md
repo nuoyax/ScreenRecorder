@@ -77,14 +77,23 @@ ScreenRecorder 通过 **Windows.Graphics.Capture** 捕获全屏、单个窗口�
 # 安装前端依赖
 npm install
 
-# 构建发布版二进制
-npm run tauri build
+# 全量打包，并把所有产物汇总到根目录的扁平 release/
+npm run package
+
+# 或只编二进制、不做汇总
+npm run tauri build -- --no-bundle
 
 # 或开发模式运行（热重载）
 npm run tauri dev
 ```
 
-产物位于 `src-tauri/target/release/screen-recorder.exe`。
+`npm run package` 先跑 `tauri build`，再把所有产物**展平**到根目录一个 `release/`
+里——包含可直接分发的单文件 `release/screen-recorder.exe`（前端资源已内嵌，这一个
+文件就够了）以及安装包，不用再去 `src-tauri/target/release/` 深处翻。只编了二进制
+时运行它也不会报错。
+
+> 首次打包安装包需要 NSIS 工具链，Tauri 会按需从 GitHub 下载。若网络到不了
+> GitHub，`tauri build` 仍会正常产出二进制，汇总脚本则提示没有安装包。
 
 > **GNU 工具链注意**：`windres` 需要可用的 C 预处理器 —— 请将 `mingw64/bin` 加入 PATH，或改用 MSVC 构建。
 

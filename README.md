@@ -77,14 +77,25 @@ ScreenRecorder captures your screen, a single window, or a custom region via **W
 # install frontend deps
 npm install
 
-# build the release binary
-npm run tauri build
+# build everything and collect it into a flat release/ directory
+npm run package
+
+# or just the binary, without collecting
+npm run tauri build -- --no-bundle
 
 # or run in dev mode (hot reload)
 npm run tauri dev
 ```
 
-The binary is produced at `src-tauri/target/release/screen-recorder.exe`.
+`npm run package` runs `tauri build` and then flattens every artifact into a
+single top-level `release/` directory — the portable
+`release/screen-recorder.exe` (frontend embedded, so that one file is enough to
+ship) plus any installer, rather than leaving them buried under
+`src-tauri/target/release/`. It is safe to run when only the binary was built.
+
+> The first packaged build needs the NSIS toolchain, which Tauri downloads from
+> GitHub on demand. On a machine that cannot reach it, `tauri build` still
+> produces the binary and the collector reports no installer.
 
 > **GNU toolchain note**: `windres` requires a working C preprocessor — put `mingw64/bin` on PATH, or build with MSVC instead.
 
